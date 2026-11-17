@@ -1,0 +1,385 @@
+import {
+  applyMove,
+  createTokens,
+  grantsExtraTurn,
+  hasWon,
+  legalMoves,
+  rollDie,
+  YARD,
+  type Move,
+  type Seat,
+  type Token,
+} from './rules.js'
+
+export const MAX_SEATS = 4
+/** A seat that stalls this long has its turn played for it. */
+export const TURN_MS = 20_000
+/** Rooms with nobody connected are swept after this long. */
+export const ROOM_TTL_MS = 30 * 60_000
+
+export type RoomPhase = 'lobby' | 'playing' | 'finished'
+export type MatchPhase = 'await-roll' | 'await-move' | 'ended'
+
+export interface Member {
+  playerId: string
+  name: string
+  socketId: string | null
+  seat: Seat | null
+  ready: boolean
+  connected: boolean
+}
+
+export interface MatchState {
+  seats: Seat[]
+  tokens: Token[]
+  current: Seat
+  die: number | null
+  phase: MatchPhase
+  moves: Move[]
+  consecutiveSixes: number
+  ranking: Seat[]
+  /** Epoch ms by which the current seat must act. */
+  deadline: number
+}
+
+export interface Room {
+  code: string
+  hostId: string
+  members: Member[]
+  phase: RoomPhase
+  match: MatchState | null
+  createdAt: number
+  lastActivity: number
+}
+
+/** What a client is allowed to see. Identical for every member. */
+export interface RoomSnapshot {
+  code: string
+  hostId: string
+  phase: RoomPhase
+  members: Array<{ playerId: string; name: string; seat: Seat | null; ready: boolean; connected: boolean }>
+  match: {
+    seats: Seat[]
+    tokens: Token[]
+    current: Seat
+    die: number | null
+    phase: MatchPhase
+    movableTokenIds: string[]
+    ranking: Seat[]
+    deadline: number
+  } | null
+}
+
+const rooms = new Map<string, Room>()
+
+/* ───────────────────────────── codes ───────────────────────────── */
+
+function randomCode(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString()
+}
+
+export function createRoom(playerId: string, name: string): Room {
+  let code = randomCode()
+  while (rooms.has(code)) code = randomCode()
+
+  const room: Room = {
+    code,
+    hostId: playerId,
+    members: [{ playerId, name, socketId: null, seat: 0, ready: true, connected: true }],
+    phase: 'lobby',
+    match: null,
+    createdAt: Date.now(),
+    lastActivity: Date.now(),
+  }
+  rooms.set(code, room)
+  return room
+}
+
+export function getRoom(code: string): Room | undefined {
+  return rooms.get(code)
+}
+
+export function roomOfSocket(socketId: string): Room | undefined {
+  for (const room of rooms.values()) {
+    if (room.members.some((m) => m.socketId === socketId)) return room
+  }
+  return undefined
+}
+
+/* ───────────────────────────── membership ───────────────────────────── */
+
+export type JoinResult = { ok: true; room: Room } | { ok: false; error: string }
+
+export function joinRoom(code: string, playerId: string, name: string, socketId: string): JoinResult {
+  const room = rooms.get(code)
+  if (!room) return { ok: false, error: 'No room with that code' }
+
+  const existing = room.members.find((m) => m.playerId === playerId)
+  if (existing) {
+    // Reconnect: take the seat back rather than adding a duplicate.
+    existing.socketId = socketId
+    existing.connected = true
+    existing.name = name || existing.name
+    room.lastActivity = Date.now()
+    return { ok: true, room }
+  }
+
+  if (room.phase !== 'lobby') return { ok: false, error: 'That match has already started' }
+
+  const taken = new Set(room.members.map((m) => m.seat))
+  const seat = ([0, 1, 2, 3] as Seat[]).find((s) => !taken.has(s))
+  if (seat === undefined) return { ok: false, error: 'Room is full' }
+
+  room.members.push({ playerId, name, socketId, seat, ready: false, connected: true })
+  room.lastActivity = Date.now()
+  return { ok: true, room }
+}
+
+export function bindSocket(room: Room, playerId: string, socketId: string) {
+  const member = room.members.find((m) => m.playerId === playerId)
+  if (member) {
+    member.socketId = socketId
+    member.connected = true
+  }
+  room.lastActivity = Date.now()
+}
+
+export function markDisconnected(socketId: string): Room | undefined {
+  const room = roomOfSocket(socketId)
+  if (!room) return undefined
+  const member = room.members.find((m) => m.socketId === socketId)
+  if (!member) return room
+
+  member.connected = false
+  member.socketId = null
+
+  // In the lobby a leaver frees the seat entirely; mid-match the seat stays so
+  // they can reconnect, and the turn clock covers their absence.
+  if (room.phase === 'lobby') {
+    room.members = room.members.filter((m) => m.playerId !== member.playerId)
+    if (room.hostId === member.playerId && room.members.length > 0) {
+      room.hostId = room.members[0].playerId
+    }
+  }
+
+  room.lastActivity = Date.now()
+  if (room.members.length === 0) rooms.delete(room.code)
+  return room
+}
+
+export function leaveRoom(room: Room, playerId: string) {
+  room.members = room.members.filter((m) => m.playerId !== playerId)
+  if (room.hostId === playerId && room.members.length > 0) room.hostId = room.members[0].playerId
+  if (room.members.length === 0) rooms.delete(room.code)
+  room.lastActivity = Date.now()
+}
+
+export function setReady(room: Room, playerId: string, ready: boolean) {
+  const member = room.members.find((m) => m.playerId === playerId)
+  if (member) member.ready = ready
+  room.lastActivity = Date.now()
+}
+
+/* ───────────────────────────── match ───────────────────────────── */
+
+export function canStart(room: Room): string | null {
+  if (room.phase !== 'lobby') return 'Match already started'
+  const seated = room.members.filter((m) => m.seat !== null)
+  if (seated.length < 2) return 'Need at least 2 players'
+  if (!seated.every((m) => m.ready)) return 'Everyone must be ready'
+  return null
+}
+
+export function startMatch(room: Room): MatchState {
+  const seats = room.members
+    .map((m) => m.seat)
+    .filter((s): s is Seat => s !== null)
+    .sort((a, b) => a - b)
+
+  const match: MatchState = {
+    seats,
+    tokens: createTokens(seats),
+    current: seats[0],
+    die: null,
+    phase: 'await-roll',
+    moves: [],
+    consecutiveSixes: 0,
+    ranking: [],
+    deadline: Date.now() + TURN_MS,
+  }
+
+  room.match = match
+  room.phase = 'playing'
+  room.lastActivity = Date.now()
+  return match
+}
+
+export interface RollResult {
+  die: number
+  moves: Move[]
+  /** Set when the roll produced no legal move and the turn passed on. */
+  passed: boolean
+}
+
+/** The server owns the dice — clients never send a value. */
+export function doRoll(room: Room, seat: Seat): RollResult | { error: string } {
+  const m = room.match
+  if (!m || m.phase !== 'await-roll') return { error: 'Not accepting a roll' }
+  if (m.current !== seat) return { error: 'Not your turn' }
+
+  const die = rollDie()
+  const sixes = die === 6 ? m.consecutiveSixes + 1 : 0
+  m.die = die
+  m.consecutiveSixes = sixes
+  room.lastActivity = Date.now()
+
+  if (sixes >= 3) {
+    m.consecutiveSixes = 0
+    advance(m)
+    return { die, moves: [], passed: true }
+  }
+
+  const moves = legalMoves(m.tokens, seat, die)
+  m.moves = moves
+
+  if (moves.length === 0) {
+    if (die === 6) {
+      m.phase = 'await-roll'
+      m.deadline = Date.now() + TURN_MS
+    } else {
+      advance(m)
+    }
+    return { die, moves: [], passed: true }
+  }
+
+  m.phase = 'await-move'
+  m.deadline = Date.now() + TURN_MS
+  return { die, moves, passed: false }
+}
+
+export interface MoveResult {
+  tokenId: string
+  path: number[]
+  captures: string[]
+  finished: Seat | null
+  ended: boolean
+}
+
+export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { error: string } {
+  const m = room.match
+  if (!m || m.phase !== 'await-move') return { error: 'Not accepting a move' }
+  if (m.current !== seat) return { error: 'Not your turn' }
+
+  const move = m.moves.find((mv) => mv.tokenId === tokenId)
+  if (!move) return { error: 'Illegal move' }
+
+  const token = m.tokens.find((t) => t.id === tokenId)!
+  const path = move.from === YARD ? [0] : rangeInclusive(move.from + 1, move.to)
+
+  m.tokens = applyMove(m.tokens, move)
+  m.moves = []
+  room.lastActivity = Date.now()
+
+  let finished: Seat | null = null
+  if (hasWon(m.tokens, seat) && !m.ranking.includes(seat)) {
+    m.ranking.push(seat)
+    finished = seat
+  }
+
+  const remaining = m.seats.filter((s) => !m.ranking.includes(s))
+  if (remaining.length <= 1) {
+    for (const s of remaining) if (!m.ranking.includes(s)) m.ranking.push(s)
+    m.phase = 'ended'
+    room.phase = 'finished'
+    return { tokenId, path, captures: move.captures, finished, ended: true }
+  }
+
+  if (grantsExtraTurn(m.die ?? 0, move) && !m.ranking.includes(seat)) {
+    m.phase = 'await-roll'
+    m.deadline = Date.now() + TURN_MS
+  } else {
+    advance(m)
+  }
+
+  void token
+  return { tokenId, path, captures: move.captures, finished, ended: false }
+}
+
+function rangeInclusive(from: number, to: number): number[] {
+  const out: number[] = []
+  for (let p = from; p <= to; p++) out.push(p)
+  return out
+}
+
+function advance(m: MatchState) {
+  const pos = m.seats.indexOf(m.current)
+  let next = m.current
+  for (let i = 1; i <= m.seats.length; i++) {
+    const candidate = m.seats[(pos + i) % m.seats.length]
+    if (!m.ranking.includes(candidate)) {
+      next = candidate
+      break
+    }
+  }
+  m.current = next
+  m.die = null
+  m.moves = []
+  m.consecutiveSixes = 0
+  m.phase = 'await-roll'
+  m.deadline = Date.now() + TURN_MS
+}
+
+/** Picks a move for a seat that ran out of time or dropped off. */
+export function autoPick(room: Room): string | null {
+  const m = room.match
+  if (!m || m.phase !== 'await-move' || m.moves.length === 0) return null
+  // Prefer a capture, then the furthest advance — never a random no-op.
+  const best = [...m.moves].sort((a, b) => {
+    const ca = a.captures.length ? 1 : 0
+    const cb = b.captures.length ? 1 : 0
+    if (ca !== cb) return cb - ca
+    return b.to - a.to
+  })[0]
+  return best.tokenId
+}
+
+/* ───────────────────────────── snapshots ───────────────────────────── */
+
+export function snapshot(room: Room): RoomSnapshot {
+  return {
+    code: room.code,
+    hostId: room.hostId,
+    phase: room.phase,
+    members: room.members.map((m) => ({
+      playerId: m.playerId,
+      name: m.name,
+      seat: m.seat,
+      ready: m.ready,
+      connected: m.connected,
+    })),
+    match: room.match
+      ? {
+          seats: room.match.seats,
+          tokens: room.match.tokens,
+          current: room.match.current,
+          die: room.match.die,
+          phase: room.match.phase,
+          movableTokenIds: room.match.moves.map((mv) => mv.tokenId),
+          ranking: room.match.ranking,
+          deadline: room.match.deadline,
+        }
+      : null,
+  }
+}
+
+export function allRooms(): Room[] {
+  return [...rooms.values()]
+}
+
+export function sweepIdleRooms() {
+  const now = Date.now()
+  for (const [code, room] of rooms) {
+    const anyone = room.members.some((m) => m.connected)
+    if (!anyone && now - room.lastActivity > ROOM_TTL_MS) rooms.delete(code)
+  }
+}
