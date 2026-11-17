@@ -8,11 +8,11 @@
  * to change with it.
  */
 
-const APP_NAME = 'Ludo After Dark'
+const APP_NAME = 'CGP - Cockroach Game Party'
 const UPDATED = '17 November 2026'
 
-/** Set CONTACT_EMAIL in the Railway service variables. */
-const CONTACT = process.env.CONTACT_EMAIL ?? 'support@example.com'
+/** Overridable with CONTACT_EMAIL in the Railway service variables. */
+const CONTACT = process.env.CONTACT_EMAIL ?? 'kunalbamnote7@gmail.com'
 
 export function privacyHtml(): string {
   return `<!doctype html>

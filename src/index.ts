@@ -30,7 +30,7 @@ const http = createServer((req, res) => {
   // Railway and uptime pingers need a plain health endpoint.
   if (path === '/health' || path === '/') {
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, service: 'ludo-after-dark', uptime: process.uptime() }))
+    res.end(JSON.stringify({ ok: true, service: 'cgp-cockroach-game-party', uptime: process.uptime() }))
     return
   }
 

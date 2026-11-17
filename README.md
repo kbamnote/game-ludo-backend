@@ -1,4 +1,4 @@
-# Ludo After Dark — room server
+# CGP - Cockroach Game Party — room server
 
 Authoritative multiplayer server for private friend rooms. Node + Socket.IO.
 
@@ -116,5 +116,5 @@ what the app actually does — a generated device id and a chosen nickname, held
 in memory only — so keep it in step with the Data Safety answers if that
 changes.
 
-Set `CONTACT_EMAIL` in the Railway service variables. Without it the page falls
-back to `support@example.com`, which Google will reject as a contact address.
+The contact address defaults to the owner's. Override it by setting
+`CONTACT_EMAIL` in the Railway service variables.
