@@ -87,3 +87,24 @@ playerId and resume; the turn clock covers their absence meanwhile.
 
 **State is in memory.** A redeploy drops active rooms. That is fine for testing;
 a persistent store would be the next step before a real launch.
+
+### Why the build command looks like that
+
+`railway.json` builds with:
+
+```
+npm install --include=dev --no-audit --no-fund && npm run build
+```
+
+Two reasons, both learned from a failed deploy:
+
+1. **Not `npm ci`.** Nixpacks already runs `npm ci` in its own install phase.
+   Running it again in the build phase makes npm try to delete `node_modules`,
+   which fails against the mounted build cache:
+   `EBUSY: resource busy or locked, rmdir '/app/node_modules/.cache'`.
+   `npm install` reconciles in place instead of wiping the tree.
+
+2. **`--include=dev`.** Railway installs with npm's production config, so
+   `typescript` is skipped and `npm run build` dies with
+   `'tsc' is not recognized`. The flag pulls devDependencies back in for the
+   build only; the runtime image still starts from `dependencies` alone.
