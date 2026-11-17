@@ -108,3 +108,13 @@ Two reasons, both learned from a failed deploy:
    `typescript` is skipped and `npm run build` dies with
    `'tsc' is not recognized`. The flag pulls devDependencies back in for the
    build only; the runtime image still starts from `dependencies` alone.
+
+## Privacy policy
+
+`GET /privacy` serves the policy Play Console requires. It is written to match
+what the app actually does — a generated device id and a chosen nickname, held
+in memory only — so keep it in step with the Data Safety answers if that
+changes.
+
+Set `CONTACT_EMAIL` in the Railway service variables. Without it the page falls
+back to `support@example.com`, which Google will reject as a contact address.

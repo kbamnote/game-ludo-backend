@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { Server, type Socket } from 'socket.io'
+import { privacyHtml } from './privacy.js'
 import type { Seat } from './rules.js'
 import {
   allRooms,
@@ -24,12 +25,22 @@ import {
 const PORT = Number(process.env.PORT ?? 8080)
 
 const http = createServer((req, res) => {
+  const path = (req.url ?? '').split('?')[0]
+
   // Railway and uptime pingers need a plain health endpoint.
-  if (req.url === '/health' || req.url === '/') {
+  if (path === '/health' || path === '/') {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, service: 'ludo-after-dark', uptime: process.uptime() }))
     return
   }
+
+  // Play Console requires a publicly reachable privacy policy URL.
+  if (path === '/privacy' || path === '/privacy.html') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=3600' })
+    res.end(privacyHtml())
+    return
+  }
+
   res.writeHead(404)
   res.end()
 })
