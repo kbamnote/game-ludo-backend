@@ -126,6 +126,20 @@ io.on('connection', (socket) => {
     publish(room)
   })
 
+  socket.on('room:quick', (_payload: unknown, ack?: (r: unknown) => void) => {
+    const me = identityOf(socket)
+    if (!me) return ack?.({ ok: false, error: 'Identify first' })
+    const current = roomOfSocket(socket.id)
+    if (current) return ack?.({ ok: true, snapshot: snapshot(current) })
+    const open = allRooms().find((room) => room.publicTable && room.phase === 'lobby' && room.members.length < 4)
+    const room = open ?? createRoom(me.playerId, me.name, true)
+    const joined = joinRoom(room.code, me.playerId, me.name, socket.id)
+    if (!joined.ok) return ack?.({ ok: false, error: joined.error })
+    socket.join(room.code)
+    ack?.({ ok: true, snapshot: snapshot(room) })
+    publish(room)
+  })
+
   socket.on('room:join', (payload: { code?: string }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })

@@ -43,6 +43,7 @@ export interface MatchState {
 }
 
 export interface Room {
+  publicTable: boolean
   code: string
   hostId: string
   members: Member[]
@@ -54,6 +55,7 @@ export interface Room {
 
 /** What a client is allowed to see. Identical for every member. */
 export interface RoomSnapshot {
+  publicTable: boolean
   code: string
   hostId: string
   phase: RoomPhase
@@ -78,11 +80,12 @@ function randomCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-export function createRoom(playerId: string, name: string): Room {
+export function createRoom(playerId: string, name: string, publicTable = false): Room {
   let code = randomCode()
   while (rooms.has(code)) code = randomCode()
 
   const room: Room = {
+    publicTable,
     code,
     hostId: playerId,
     members: [{ playerId, name, socketId: null, seat: 0, ready: true, connected: true }],
@@ -349,6 +352,7 @@ export function snapshot(room: Room): RoomSnapshot {
   return {
     code: room.code,
     hostId: room.hostId,
+    publicTable: room.publicTable,
     phase: room.phase,
     members: room.members.map((m) => ({
       playerId: m.playerId,

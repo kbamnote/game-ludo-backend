@@ -1,4 +1,5 @@
 import { io } from 'socket.io-client'
+import assert from 'node:assert/strict'
 
 const URL = process.env.URL ?? 'http://localhost:8080'
 const log = (...a) => console.log(...a)
@@ -22,6 +23,24 @@ const created = await call(a, 'room:create')
 if (!created.ok) throw new Error('create failed: ' + created.error)
 const code = created.snapshot.code
 log('room created:', code)
+
+const quick = await connect('Quick')
+const guest = await connect('Guest')
+try {
+  const first = await call(quick, 'room:quick')
+  const second = await call(guest, 'room:quick')
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.notEqual(first.snapshot.code, code)
+  assert.equal(second.snapshot.code, first.snapshot.code)
+  assert.equal(second.snapshot.members.length, 2)
+  const repeat = await call(guest, 'room:quick')
+  assert.equal(repeat.snapshot.members.length, 2)
+  log('public players paired in a separate room')
+} finally {
+  quick.close()
+  guest.close()
+}
 
 const joined = await call(b, 'room:join', { code })
 if (!joined.ok) throw new Error('join failed: ' + joined.error)
