@@ -276,7 +276,6 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
   const move = m.moves.find((mv) => mv.tokenId === tokenId)
   if (!move) return { error: 'Illegal move' }
 
-  const token = m.tokens.find((t) => t.id === tokenId)!
   const path = move.from === YARD ? [0] : rangeInclusive(move.from + 1, move.to)
 
   m.tokens = applyMove(m.tokens, move)
@@ -304,7 +303,8 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
     advance(m)
   }
 
-  void token
+  // Give the next decision its full turn clock after the rescue presentation.
+  if (move.captures.length) m.deadline += path.length * 280 + move.captures.length * 6500
   return { tokenId, path, captures: move.captures, finished, ended: false }
 }
 
