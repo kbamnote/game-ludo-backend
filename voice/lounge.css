@@ -1,0 +1,14 @@
+:root{color-scheme:dark;font:16px/1.45 system-ui,sans-serif;background:#0c2043;color:#eef4ff}
+*{box-sizing:border-box}body{margin:0}main{max-width:540px;margin:auto;padding:4px 16px 32px}
+section,.panel{display:grid;gap:12px}[hidden]{display:none!important}
+.panel{background:#153158;border:1px solid #395b85;border-radius:18px;padding:17px}
+.hero{background:linear-gradient(145deg,#483265,#182d5a);text-align:center;justify-items:center;padding:22px}
+h1,h2,p{margin:0}h1,h2,label{color:#ffe5a3;font-weight:750}h1{font-size:27px}h2{font-size:20px}
+p{color:#cfdef3}input,button{font:inherit;border-radius:12px;min-height:46px;padding:10px 14px;width:100%}
+input{background:#091e3e;color:white;border:1px solid #6483ac}
+button{color:#402c0c;background:#ffcf67;border:1px solid #ffe7a4;border-bottom:3px solid #aa762a;font-weight:750;cursor:pointer}
+button.secondary{color:#dceaff;background:#213e69;border-color:#4a6590}button:disabled{opacity:.55;cursor:default}
+#code,#roomCode{letter-spacing:.12em;text-transform:uppercase}#status{text-align:center;margin-top:14px;color:#ffdf91}
+ul{list-style:none;padding:0;margin:0}li{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid #304b71}
+li:last-child{border:0}li span{color:#b2c6e0;font-size:14px}.wave{display:flex;gap:4px;align-items:center;height:44px}
+.wave i{width:7px;height:13px;border-radius:5px;background:#ffd872}.wave i:nth-child(even){height:28px}.wave i:nth-child(3){height:41px}

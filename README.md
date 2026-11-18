@@ -1,5 +1,14 @@
 # CGP - Cockroach Game Party — room server
 
+### Voice Adda
+
+The same server serves the embedded lounge at `/voice/` and relays live audio
+through the Socket.IO `/voice` namespace. Deploy the `voice/` directory alongside
+`dist/` and use HTTPS with WebSocket upgrades. A room holds up to four sockets
+and disappears when empty. Each unmuted device sends about 48 KB/s of mono PCM
+before transport overhead. The service forwards frames only to the other
+members of the room and never writes audio to disk.
+
 Authoritative multiplayer server for private friend rooms. Node + Socket.IO.
 
 The server runs the **same rules engine as the app** (`src/rules.ts` is a copy of

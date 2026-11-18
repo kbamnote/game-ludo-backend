@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Voice Adda</title><link rel="stylesheet" href="./lounge.css">
+  <script defer src="/socket.io/socket.io.js"></script><script defer src="./lounge.js"></script>
+</head>
+<body>
+<main>
+  <section id="setup">
+    <div class="panel hero"><div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <h1>Friends lounge</h1><p>Talk live with up to three friends. You enter with your microphone muted.</p></div>
+    <div class="panel"><label for="name">Player name</label><input id="name" maxlength="16" autocomplete="off" value="Player">
+      <button id="create">Create a voice room</button></div>
+    <form id="joinForm" class="panel"><label for="code">Have a room code?</label>
+      <input id="code" placeholder="8-character code" maxlength="8" autocapitalize="characters" autocomplete="off" spellcheck="false">
+      <button id="join" type="submit" class="secondary">Join voice room</button></form>
+  </section>
+  <section id="lounge" hidden>
+    <div class="panel hero"><p>Voice room code</p><h1 id="roomCode"></h1>
+      <button id="invite" class="secondary">Share room code</button></div>
+    <div class="panel"><h2>At the table</h2><ul id="members"></ul></div>
+    <button id="mic">Unmute microphone</button>
+    <button id="resume" class="secondary" hidden>Resume sound</button>
+    <button id="leave" class="secondary">Leave voice room</button>
+  </section>
+  <p id="status" role="status" aria-live="polite"></p>
+</main>
+</body></html>

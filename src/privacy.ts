@@ -9,7 +9,7 @@
  */
 
 const APP_NAME = 'CGP - Cockroach Game Party'
-const UPDATED = '17 November 2026'
+const UPDATED = '18 November 2026'
 
 /** Overridable with CONTACT_EMAIL in the Railway service variables. */
 const CONTACT = process.env.CONTACT_EMAIL ?? 'kunalbamnote7@gmail.com'
@@ -64,8 +64,8 @@ export function privacyHtml(): string {
     <p class="updated">${APP_NAME} · Last updated ${UPDATED}</p>
 
     <p>
-      This policy explains what ${APP_NAME} collects and why. In short: the game asks for a
-      nickname so other players can tell you apart, and nothing else. There are no accounts,
+      This policy explains how ${APP_NAME} handles game data and optional live voice.
+      The game uses a nickname so other players can tell you apart. There are no accounts,
       no advertising, and no analytics or tracking software in the app.
     </p>
 
@@ -86,12 +86,16 @@ export function privacyHtml(): string {
         <strong>Gameplay actions while you are in an online room.</strong> Room codes, dice
         rolls and piece moves, so the server can referee the match.
       </li>
+      <li><strong>Optional voice chat.</strong> Voice Adda enters rooms muted. When you
+        unmute and allow microphone access, the game server relays live microphone audio
+        to the other players in that voice room. The game does not record or store audio.
+        Muting, leaving, or closing the lounge stops microphone capture.</li>
     </ul>
 
     <h2>What the app does not collect</h2>
     <p>
       No name, email address, phone number, date of birth, location, contacts, photos,
-      microphone or camera data, and no payment information. The app contains no advertising
+      camera data, or payment information. The app contains no advertising
       network, no analytics and no crash-reporting service.
     </p>
 
@@ -119,9 +123,9 @@ export function privacyHtml(): string {
 
     <h2>Who else receives your information</h2>
     <p>
-      Nobody. Your nickname is visible to the other players in your room, which is the point
-      of it. Beyond that, information is not sold, rented or shared with third parties. The
-      only external company involved is Railway, which hosts the server.
+      Other players in your room see your nickname. Players in your voice room receive
+      the audio you send while unmuted. Railway hosts the game server that delivers this
+      data. You choose who receives any room code you share.
     </p>
 
     <h2>Children</h2>

@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { Server, type Socket } from 'socket.io'
 import { privacyHtml } from './privacy.js'
+import { attachVoice, serveVoice } from './voice.js'
 import type { Seat } from './rules.js'
 import {
   allRooms,
@@ -26,6 +27,7 @@ const PORT = Number(process.env.PORT ?? 8080)
 
 const http = createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0]
+  if (serveVoice(path, res)) return
 
   // Railway and uptime pingers need a plain health endpoint.
   if (path === '/health' || path === '/') {
@@ -50,6 +52,7 @@ const io = new Server(http, {
   pingTimeout: 20_000,
   pingInterval: 10_000,
 })
+attachVoice(io)
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 
