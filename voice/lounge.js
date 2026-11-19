@@ -3,7 +3,14 @@
 const el = (id) => document.getElementById(id)
 const nameField = el('name')
 const codeField = el('code')
-nameField.value = new URLSearchParams(location.hash.slice(1)).get('name')?.slice(0, 16) || 'Player'
+const params = new URLSearchParams(location.hash.slice(1))
+const matchTicket = params.get('match')
+nameField.value = params.get('name')?.slice(0, 16) || 'Player'
+if (matchTicket) {
+  document.documentElement.classList.add('match-chat')
+  el('setup').hidden = true
+  el('matchSetup').hidden = false
+}
 let socket = null
 let context = null
 let roomCode = ''
@@ -40,9 +47,10 @@ function leave(message = '') {
     context = null
   }
   playAt.clear()
-  el('setup').hidden = false
+  el('setup').hidden = Boolean(matchTicket)
+  el('matchSetup').hidden = !matchTicket
   el('lounge').hidden = true
-  el('create').disabled = el('join').disabled = false
+  el('create').disabled = el('join').disabled = el('joinMatch').disabled = false
   notice(message)
 }
 
@@ -80,7 +88,7 @@ function play(id, frame) {
 function enter(create) {
   if (socket) return
   const code = codeField.value.trim().toUpperCase()
-  if (!create && !/^[A-Z2-9]{8}$/.test(code)) return notice('Enter the eight-character code from your friend.')
+  if (!matchTicket && !create && !/^[A-Z2-9]{8}$/.test(code)) return notice('Enter the eight-character code from your friend.')
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) return notice('Voice needs a secure HTTPS connection and microphone support.')
   try {
     context = new AudioContext()
@@ -90,20 +98,25 @@ function enter(create) {
     socket = io('/voice', { transports: ['websocket'], reconnection: false, timeout: 10000, autoConnect: false })
   } catch { return leave('Audio could not start on this device.') }
   const session = socket
-  el('create').disabled = el('join').disabled = true
+  el('create').disabled = el('join').disabled = el('joinMatch').disabled = true
   notice('Connecting to the voice room…')
   session.on('connect_error', () => leave('Could not reach the Ludo voice server. Try again.'))
-  session.on('disconnect', () => leave('Voice disconnected. You can rejoin with your room code.'))
+  session.on('disconnect', () => leave(matchTicket
+    ? 'Voice disconnected. Close and reopen Voice chat to reconnect.'
+    : 'Voice disconnected. You can rejoin with your room code.'))
   session.on('roster', roster)
   session.on('audio', play)
   session.on('connect', () => {
-    session.timeout(8000).emit('enter', { create, code, name: nameField.value }, (error, reply) => {
+    const event = matchTicket ? 'enterMatch' : 'enter'
+    const payload = matchTicket ?? { create, code, name: nameField.value }
+    session.timeout(8000).emit(event, payload, (error, reply) => {
       if (session !== socket) return
       if (error || !reply?.code) return leave(reply?.error || 'The voice server did not respond.')
       roomCode = reply.code
       codeField.value = roomCode
       el('roomCode').textContent = roomCode
       el('setup').hidden = true
+      el('matchSetup').hidden = true
       el('lounge').hidden = false
       roster(reply.members)
       notice('Microphone muted. Unmute when you want to speak.')
@@ -150,6 +163,7 @@ async function toggleMic() {
 
 el('joinForm').onsubmit = (event) => { event.preventDefault(); enter(false) }
 el('create').onclick = () => enter(true)
+el('joinMatch').onclick = () => enter(false)
 el('mic').onclick = toggleMic
 el('leave').onclick = () => leave('You left the lounge.')
 el('resume').onclick = () => context?.resume().catch(() => notice('Sound is paused by your device.'))

@@ -9,7 +9,7 @@
  */
 
 const APP_NAME = 'CGP - Cockroach Game Party'
-const UPDATED = '18 November 2026'
+const UPDATED = '19 November 2026'
 
 /** Overridable with CONTACT_EMAIL in the Railway service variables. */
 const CONTACT = process.env.CONTACT_EMAIL ?? 'kunalbamnote7@gmail.com'
@@ -86,15 +86,27 @@ export function privacyHtml(): string {
         <strong>Gameplay actions while you are in an online room.</strong> Room codes, dice
         rolls and piece moves, so the server can referee the match.
       </li>
-      <li><strong>Optional voice chat.</strong> Voice Adda enters rooms muted. When you
+      <li><strong>Optional voice chat.</strong> Voice Adda and Friends match voice chat start muted. When you
         unmute and allow microphone access, the game server relays live microphone audio
         to the other players in that voice room. The game does not record or store audio.
         Muting, leaving, or closing the lounge stops microphone capture.</li>
+      <li><strong>Optional character appearance.</strong> You can choose a character and
+        crop a selfie on your device. For online play the game sends the selected model and
+        a 64-by-64 face texture to the room server so players in the match can see it.
+        For the Varsity character, tapping Fit sends the small crop to our server to
+        estimate 68 facial landmarks for the 3D mesh. Fitting runs in memory and the
+        response returns the points to your device. Online matches share these points
+        along with the face texture. These older appearances keep the original photo on your device.</li>
+      <li><strong>Optional MetaPerson avatars.</strong> When you choose Generate, the app
+        resizes the selected portrait and sends a JPEG through the game server to Avatar SDK
+        (itSeez3D) to create the 3D likeness and outfit. The game server handles the photo
+        in memory and stores the resulting model and generation ID. Equipping the avatar
+        shares a model identifier with the room so the other players can download and see it.</li>
     </ul>
 
     <h2>What the app does not collect</h2>
     <p>
-      No name, email address, phone number, date of birth, location, contacts, photos,
+      No legal name, email address, phone number, date of birth, location, contacts,
       camera data, or payment information. The app contains no advertising
       network, no analytics and no crash-reporting service.
     </p>
@@ -107,9 +119,10 @@ export function privacyHtml(): string {
 
     <h2>How long the server keeps anything</h2>
     <p>
-      Rooms exist only in the server's memory. There is no database and nothing is written to
-      disk. A room is discarded once it has been empty for 30 minutes, and every room is lost
-      whenever the server restarts. Your nickname and device id live only inside the room you
+      Rooms exist only in the server's memory. Generated MetaPerson files are stored separately
+      so your avatar is available for future matches. A room is discarded once it has been empty for 30 minutes, and every room is lost
+      whenever the server restarts. The room holds the character appearance in memory.
+      Your nickname and device id live only inside the room you
       are in and disappear with it.
     </p>
 
@@ -123,9 +136,10 @@ export function privacyHtml(): string {
 
     <h2>Who else receives your information</h2>
     <p>
-      Other players in your room see your nickname. Players in your voice room receive
+      Other players in your match see your nickname and equipped character. Players in your voice room receive
       the audio you send while unmuted. Railway hosts the game server that delivers this
-      data. You choose who receives any room code you share.
+      data. Avatar SDK processes a portrait when you choose MetaPerson generation.
+      You choose who receives any room code you share.
     </p>
 
     <h2>Children</h2>
@@ -138,7 +152,10 @@ export function privacyHtml(): string {
     <h2>Your choices</h2>
     <ul>
       <li>Change your nickname at any time on the Play with Friends screen.</li>
-      <li>Play offline — the single-player and pass-and-play modes send nothing to any server.</li>
+      <li>In Player settings, open My character to remove a selfie and equip the change for
+        future matches, or reset to your seat character to erase the saved appearance.</li>
+      <li>Creating a MetaPerson avatar requires a connection. Resetting your seat character
+        unequips the avatar. Contact us to request deletion of its stored model.</li>
       <li>Uninstall the app to erase everything stored on your device.</li>
       <li>Ask us to delete anything associated with your device id, using the contact below.</li>
     </ul>

@@ -1,6 +1,8 @@
 import { createServer } from 'node:http'
 import { Server, type Socket } from 'socket.io'
 import { privacyHtml } from './privacy.js'
+import { fitPortrait } from './fitPortrait.js'
+import { serveMetaPerson } from './metaperson.js'
 import { attachVoice, serveVoice } from './voice.js'
 import type { Seat } from './rules.js'
 import {
@@ -14,6 +16,7 @@ import {
   joinRoom,
   leaveRoom,
   markDisconnected,
+  readCharacter,
   roomOfSocket,
   setReady,
   snapshot,
@@ -24,9 +27,15 @@ import {
 } from './room.js'
 
 const PORT = Number(process.env.PORT ?? 8080)
+const reactions = new Set(['knife', 'heart', 'cactus', 'orange', 'snowball', 'duck', 'gift', 'bomb'])
+const reactionAvailableAt = new WeakMap<Room, number>()
+const soundAvailableAt = new WeakMap<Room, number>()
+const MATCH_SOUND_COUNT = 18
 
 const http = createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0]
+  if (path.startsWith('/avatars/metaperson/')) { void serveMetaPerson(req,res); return }
+  if (path === '/avatars/fit') { void fitPortrait(req, res); return }
   if (serveVoice(path, res)) return
 
   // Railway and uptime pingers need a plain health endpoint.
@@ -118,43 +127,44 @@ io.on('connection', (socket) => {
     ack?.({ ok: true })
   })
 
-  socket.on('room:create', (_payload: unknown, ack?: (r: unknown) => void) => {
+  socket.on('room:create', (payload: { character?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
 
-    const room = createRoom(me.playerId, me.name)
+    const room = createRoom(me.playerId, me.name, false, readCharacter(payload?.character))
     bindSocket(room, me.playerId, socket.id)
     socket.join(room.code)
     ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
   })
 
-  socket.on('room:quick', (_payload: unknown, ack?: (r: unknown) => void) => {
+  socket.on('room:quick', (payload: { character?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
     const current = roomOfSocket(socket.id)
     if (current) return ack?.({ ok: true, snapshot: snapshot(current) })
     const open = allRooms().find((room) => room.publicTable && room.phase === 'lobby' && room.members.length < 4)
     const room = open ?? createRoom(me.playerId, me.name, true)
-    const joined = joinRoom(room.code, me.playerId, me.name, socket.id)
+    const joined = joinRoom(room.code, me.playerId, me.name, socket.id, readCharacter(payload?.character))
     if (!joined.ok) return ack?.({ ok: false, error: joined.error })
     socket.join(room.code)
     ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
   })
 
-  socket.on('room:join', (payload: { code?: string }, ack?: (r: unknown) => void) => {
+  socket.on('room:join', (payload: { code?: string; character?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
 
     const code = (payload?.code ?? '').trim()
     if (!/^\d{6}$/.test(code)) return ack?.({ ok: false, error: 'Enter the 6-digit code' })
 
-    const result = joinRoom(code, me.playerId, me.name, socket.id)
+    const result = joinRoom(code, me.playerId, me.name, socket.id, readCharacter(payload?.character))
     if (!result.ok) return ack?.({ ok: false, error: result.error })
 
     socket.join(code)
     ack?.({ ok: true, snapshot: snapshot(result.room) })
+    if (result.room.phase === 'playing') socket.emit('match:started', snapshot(result.room, true))
     publish(result.room)
   })
 
@@ -177,7 +187,7 @@ io.on('connection', (socket) => {
 
     startMatch(room)
     ack?.({ ok: true })
-    io.to(room.code).emit('match:started', snapshot(room))
+    io.to(room.code).emit('match:started', snapshot(room, true))
     publish(room)
   })
 
@@ -199,6 +209,38 @@ io.on('connection', (socket) => {
 
     const result = performRoll(room, seat)
     ack?.('error' in result ? { ok: false, error: result.error } : { ok: true })
+  })
+
+  socket.on('match:reaction', (payload: { kind?: unknown; to?: unknown }, reply?: (r: unknown) => void) => {
+    if (typeof reply !== 'function') return
+    const room = roomOfSocket(socket.id)
+    const sender = room?.members.find(member => member.socketId === socket.id && member.connected)
+    if (room?.phase !== 'playing' || !sender || sender.seat === null) return reply({ ok: false, error: 'Join a match first.' })
+    if (typeof payload?.kind !== 'string' || !reactions.has(payload.kind) || !room.members.some(
+      member => member.seat !== null && member.connected && member.seat === payload.to && member.seat !== sender.seat,
+    )) return reply({ ok: false, error: 'Choose a connected player and a reaction.' })
+    const now = Date.now()
+    if (now < (reactionAvailableAt.get(room) ?? 0)) return reply({ ok: false, error: 'Wait for the current reaction to finish.' })
+    // Reserve the room for the launch delay plus the visual effect.
+    reactionAvailableAt.set(room, now + (payload.kind === 'bomb' ? 6900 : 4850))
+    io.to(room.code).emit('match:reaction', { roomCode: room.code, kind: payload.kind, from: sender.seat, to: payload.to })
+    reply({ ok: true })
+  })
+
+  socket.on('match:sound', (payload: { clip?: unknown }, reply?: (r: unknown) => void) => {
+    if (typeof reply !== 'function') return
+    const room = roomOfSocket(socket.id)
+    const sender = room?.members.find(member => member.socketId === socket.id && member.connected && member.seat !== null)
+    if (room?.phase !== 'playing' || !sender) return reply({ ok: false, error: 'Join a match to play a sound.' })
+    const clip = payload?.clip
+    if (typeof clip !== 'number' || !Number.isInteger(clip) || clip < 1 || clip > MATCH_SOUND_COUNT) {
+      return reply({ ok: false, error: 'That sound is unavailable.' })
+    }
+    const now = Date.now()
+    if (now < (soundAvailableAt.get(room) ?? 0)) return reply({ ok: false, error: 'Give the sound a moment before playing another.' })
+    soundAvailableAt.set(room, now + (clip === 11 ? 6100 : 900))
+    io.to(room.code).emit('match:sound', { roomCode: room.code, clip })
+    reply({ ok: true })
   })
 
   socket.on('match:move', (payload: { tokenId?: string }, ack?: (r: unknown) => void) => {
@@ -245,6 +287,6 @@ function roomsNeedingAttention(now: number): Room[] {
   })
 }
 
-http.listen(PORT, () => {
+http.listen({ port:PORT, host:process.env.LUDO_BIND_HOST }, () => {
   console.log(`[ludo] listening on :${PORT} (turn clock ${TURN_MS / 1000}s)`)
 })

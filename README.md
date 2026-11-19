@@ -56,6 +56,20 @@ is using at the bottom, which makes a misconfigured build obvious.
 
 ## Protocol
 
+### MetaPerson avatar generation
+
+Configure `METAPERSON_CLIENT_ID` and `METAPERSON_CLIENT_SECRET` on the server
+using an Avatar SDK Client Access application with the client-credentials grant
+and MetaPerson REST entitlement. The Expo project needs only its existing game
+server URL. Mount persistent storage at `AVATAR_DATA_DIR` (default
+`./avatar-data`) for model files, generation handles and daily usage. A single
+server instance handles jobs. `METAPERSON_DAILY_LIMIT` defaults to three new
+submissions per UTC day. A repeat of the same portrait and outfit reuses its
+job. A pending generation resumes when the player reopens the creator.
+
+The mobile creator uses MetaPerson 2.1 full-body outfits returned by the
+provider for the selected body style. [Provider export contract](https://api.avatarsdk.com/samples/curl_metaperson_21/).
+
 Client to server:
 
 | Event | Payload | Notes |

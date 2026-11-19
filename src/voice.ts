@@ -1,7 +1,8 @@
-import { randomInt } from 'node:crypto'
+import { randomBytes, randomInt } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import type { ServerResponse } from 'node:http'
 import type { Server } from 'socket.io'
+import { getRoom, roomOfSocket } from './room.js'
 
 const files = [
   ['/voice/', 'index.html', 'text/html; charset=utf-8'],
@@ -34,12 +35,47 @@ type Lounge = Map<string, Member>
 export function attachVoice(io: Server) {
   const voice = io.of('/voice')
   const rooms = new Map<string, Lounge>()
+  const tickets = new Map<string, { socketId: string; roomCode: string }>()
+  const matchSessions = new Map<string, () => void>()
+  const gameSocketsByVoice = new Map<string, string>()
+  const friendsRoom = (id: string) => {
+    const room = roomOfSocket(id)
+    const member = room?.members.find(member => member.socketId === id && member.connected && member.seat !== null)
+    return room?.phase === 'playing' && !room.publicTable && member ? { room, member } : undefined
+  }
+  io.on('connection', socket => {
+    let ticket: string | undefined
+    let expiration: ReturnType<typeof setTimeout> | undefined
+    const clearTicket = () => {
+      if (ticket) tickets.delete(ticket)
+      clearTimeout(expiration)
+    }
+    const exitVoice = () => { clearTicket(); matchSessions.get(socket.id)?.() }
+    socket.on('room:leave', exitVoice)
+    socket.on('disconnect', exitVoice)
+    socket.on('match:voice', (_request, reply) => {
+      if (typeof reply !== 'function') return
+      const match = friendsRoom(socket.id)
+      if (!match) return reply({ ok: false, error: 'Join a Friends match to use its voice chat.' })
+      clearTicket()
+      ticket = randomBytes(24).toString('base64url')
+      tickets.set(ticket, { socketId: socket.id, roomCode: match.room.code })
+      expiration = setTimeout(clearTicket, 120_000)
+      expiration.unref()
+      reply({ ok: true, ticket })
+    })
+  })
   voice.on('connection', (socket) => {
     let code = ''
     let allowance = 15
     let lastFrame = performance.now()
+    let gameSocketId: string | undefined
+    let gameRoomCode: string | undefined
     const roster = () => voice.to(code).emit('roster', [...(rooms.get(code)?.values() ?? [])])
     function leave() {
+      if (gameSocketId) matchSessions.delete(gameSocketId)
+      gameSocketsByVoice.delete(socket.id)
+      gameSocketId = gameRoomCode = undefined
       const room = rooms.get(code)
       if (!room) return
       room.delete(socket.id)
@@ -48,6 +84,32 @@ export function attachVoice(io: Server) {
       else roster()
       code = ''
     }
+    function join(key: string, room: Lounge, name: string, reply: (result: unknown) => void) {
+      code = key
+      room.set(socket.id, { id: socket.id, name, muted: true })
+      void socket.join(code)
+      reply({ code, members: [...room.values()] })
+      roster()
+    }
+    socket.on('enterMatch', (ticket, reply) => {
+      if (typeof reply !== 'function') return
+      if (code || typeof ticket !== 'string') return reply({ error: 'Invalid match voice session.' })
+      const grant = tickets.get(ticket)
+      if (grant) tickets.delete(ticket)
+      const match = grant && friendsRoom(grant.socketId)
+      if (!grant || !match || match.room.code !== grant.roomCode) {
+        return reply({ error: 'Reopen Voice chat in your match to connect.' })
+      }
+      matchSessions.get(grant.socketId)?.()
+      gameSocketId = grant.socketId
+      gameRoomCode = grant.roomCode
+      matchSessions.set(grant.socketId, () => socket.disconnect())
+      gameSocketsByVoice.set(socket.id, grant.socketId)
+      const key = 'match:' + grant.roomCode
+      const room = rooms.get(key) ?? new Map()
+      rooms.set(key, room)
+      join(key, room, match.member.name, reply)
+    })
     socket.on('enter', (request, reply) => {
       if (typeof reply !== 'function') return
       if (code) return reply({ error: 'Leave your current lounge first.' })
@@ -61,11 +123,7 @@ export function attachVoice(io: Server) {
       const room = typeof key === 'string' ? rooms.get(key) : undefined
       if (!room) return reply({ error: 'Lounge not found. Check the eight-character code.' })
       if (room.size >= 4) return reply({ error: 'This lounge has four players already.' })
-      code = key
-      room.set(socket.id, { id: socket.id, name, muted: true })
-      void socket.join(code)
-      reply({ code, members: [...room.values()] })
-      roster()
+      join(key, room, name, reply)
     })
     socket.on('mute', (muted) => {
       const member = rooms.get(code)?.get(socket.id)
@@ -81,6 +139,17 @@ export function attachVoice(io: Server) {
       lastFrame = now
       if (allowance < 1) return
       allowance--
+      if (gameRoomCode) {
+        const match = getRoom(gameRoomCode)
+        const activeSeats = match?.phase === 'playing' ? match.members.filter(member => member.connected && member.seat !== null) : []
+        if (!activeSeats.some(member => member.socketId === gameSocketId)) { socket.disconnect(); return }
+        for (const id of rooms.get(code)?.keys() ?? []) {
+          if (id !== socket.id && activeSeats.some(member => member.socketId === gameSocketsByVoice.get(id))) {
+            voice.sockets.get(id)?.volatile.emit('audio', socket.id, frame)
+          }
+        }
+        return
+      }
       socket.to(code).volatile.emit('audio', socket.id, frame)
     })
     socket.on('leave', leave)

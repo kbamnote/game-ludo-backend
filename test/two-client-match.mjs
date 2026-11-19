@@ -19,7 +19,9 @@ let state = null
 const latest = () => state
 for (const s of [a, b]) s.on('room:state', (snap) => { state = snap })
 
-const created = await call(a, 'room:create')
+const character = { model: 4, face: Buffer.alloc(64 * 64 * 3, 117).toString('base64'),
+  fit: Buffer.from(Array.from({ length: 136 }, (_, i) => i + 15)).toString('base64') }
+const created = await call(a, 'room:create', { character })
 if (!created.ok) throw new Error('create failed: ' + created.error)
 const code = created.snapshot.code
 log('room created:', code)
@@ -42,7 +44,7 @@ try {
   guest.close()
 }
 
-const joined = await call(b, 'room:join', { code })
+const joined = await call(b, 'room:join', { code, character: { model: 1, face: 'invalid texture' } })
 if (!joined.ok) throw new Error('join failed: ' + joined.error)
 log('bravo joined; members:', joined.snapshot.members.map((m) => `${m.name}@seat${m.seat}`).join(', '))
 
@@ -54,9 +56,18 @@ b.emit('room:ready', { ready: true })
 a.emit('room:ready', { ready: true })
 await new Promise((r) => setTimeout(r, 150))
 
+const appearances = Promise.all([a, b].map(s => new Promise(resolve => s.once('match:started', resolve))))
 const started = await call(a, 'room:start')
 if (!started.ok) throw new Error('start failed: ' + started.error)
 log('match started')
+for (const match of await appearances) {
+  assert.deepEqual(match.members[0].character, character)
+  assert.equal(match.members[1].character, undefined)
+}
+const restored = new Promise(resolve => b.once('match:started', resolve))
+await call(b, 'room:join', { code })
+assert.deepEqual((await restored).members[0].character, character)
+assert.ok(latest().members.every(member => !('character' in member)))
 
 // Non-host cannot start, and a seat cannot act out of turn
 const notHost = await call(b, 'room:start')

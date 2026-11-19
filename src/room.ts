@@ -20,7 +20,35 @@ export const ROOM_TTL_MS = 30 * 60_000
 export type RoomPhase = 'lobby' | 'playing' | 'finished'
 export type MatchPhase = 'await-roll' | 'await-move' | 'ended'
 
+interface Character {
+  model: Seat | 4
+  avatarId?: string
+  face?: string
+  fit?: string
+}
+
+// A face contains exactly 64 × 64 RGB pixels. Never accept a URL or a full photo.
+export function readCharacter(value: unknown): Character | undefined {
+  if (!value || typeof value !== 'object' || !('model' in value)) return
+  const model = value.model
+  if ('avatarId' in value) {
+    if (model === 4 && typeof value.avatarId === 'string' && /^[a-f0-9]{64}$/.test(value.avatarId)
+      && !('face' in value) && !('fit' in value)) return { model, avatarId: value.avatarId }
+    return
+  }
+  if (typeof model !== 'number' || !Number.isInteger(model) || model < 0 || model > 4) return
+  if (!('face' in value)) return { model: model as Character['model'] }
+  const face = value.face
+  if (typeof face !== 'string' || face.length !== 16384 || !/^[A-Za-z0-9+/]+$/.test(face)) return
+  if (model === 4) {
+    if (!('fit' in value) || typeof value.fit !== 'string' || !/^[A-Za-z0-9+/]{182}==$/.test(value.fit)) return
+    return { model, face, fit: value.fit }
+  }
+  return { model: model as Seat, face }
+}
+
 export interface Member {
+  character?: Character
   playerId: string
   name: string
   socketId: string | null
@@ -59,7 +87,7 @@ export interface RoomSnapshot {
   code: string
   hostId: string
   phase: RoomPhase
-  members: Array<{ playerId: string; name: string; seat: Seat | null; ready: boolean; connected: boolean }>
+  members: Omit<Member, 'socketId'>[]
   match: {
     seats: Seat[]
     tokens: Token[]
@@ -80,7 +108,7 @@ function randomCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-export function createRoom(playerId: string, name: string, publicTable = false): Room {
+export function createRoom(playerId: string, name: string, publicTable = false, character?: Character): Room {
   let code = randomCode()
   while (rooms.has(code)) code = randomCode()
 
@@ -88,7 +116,7 @@ export function createRoom(playerId: string, name: string, publicTable = false):
     publicTable,
     code,
     hostId: playerId,
-    members: [{ playerId, name, socketId: null, seat: 0, ready: true, connected: true }],
+    members: [{ playerId, name, character, socketId: null, seat: 0, ready: true, connected: true }],
     phase: 'lobby',
     match: null,
     createdAt: Date.now(),
@@ -113,7 +141,7 @@ export function roomOfSocket(socketId: string): Room | undefined {
 
 export type JoinResult = { ok: true; room: Room } | { ok: false; error: string }
 
-export function joinRoom(code: string, playerId: string, name: string, socketId: string): JoinResult {
+export function joinRoom(code: string, playerId: string, name: string, socketId: string, character?: Character): JoinResult {
   const room = rooms.get(code)
   if (!room) return { ok: false, error: 'No room with that code' }
 
@@ -123,6 +151,7 @@ export function joinRoom(code: string, playerId: string, name: string, socketId:
     existing.socketId = socketId
     existing.connected = true
     existing.name = name || existing.name
+    if (room.phase === 'lobby') existing.character = character
     room.lastActivity = Date.now()
     return { ok: true, room }
   }
@@ -133,7 +162,7 @@ export function joinRoom(code: string, playerId: string, name: string, socketId:
   const seat = ([0, 1, 2, 3] as Seat[]).find((s) => !taken.has(s))
   if (seat === undefined) return { ok: false, error: 'Room is full' }
 
-  room.members.push({ playerId, name, socketId, seat, ready: false, connected: true })
+  room.members.push({ playerId, name, character, socketId, seat, ready: false, connected: true })
   room.lastActivity = Date.now()
   return { ok: true, room }
 }
@@ -348,7 +377,7 @@ export function autoPick(room: Room): string | null {
 
 /* ───────────────────────────── snapshots ───────────────────────────── */
 
-export function snapshot(room: Room): RoomSnapshot {
+export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
   return {
     code: room.code,
     hostId: room.hostId,
@@ -360,6 +389,7 @@ export function snapshot(room: Room): RoomSnapshot {
       seat: m.seat,
       ready: m.ready,
       connected: m.connected,
+      ...(includeCharacters && m.character ? { character: m.character } : {}),
     })),
     match: room.match
       ? {
