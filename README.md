@@ -56,6 +56,31 @@ is using at the bottom, which makes a misconfigured build obvious.
 
 ## Protocol
 
+### Account onboarding
+
+Use Node 22.13 or newer. Attach a persistent volume to the Railway backend.
+The account database defaults to `accounts.sqlite` inside the mounted volume.
+Set `AUTH_DB_PATH` for a different database path on persistent storage. Local
+development defaults to `.accounts.sqlite`. Keep the backend on one replica.
+
+Set `AUTH_PUBLIC_URL` to the backend's public HTTPS origin. Configure these
+provider credentials as Railway service variables.
+
+| Provider | Variables | Authorized redirect URI |
+|---|---|---|
+| Google OAuth Web application | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `<AUTH_PUBLIC_URL>/auth/callback/google` |
+| Facebook Login | `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET` | `<AUTH_PUBLIC_URL>/auth/callback/facebook` |
+
+The callback returns mobile players to the app's `cgp` scheme. Test social
+sign-in in an installed CGP development or release build. For a hosted web app,
+set `AUTH_WEB_ORIGIN` to its HTTPS origin so the callback can return there.
+
+Guest play uses the same account database and works without social-provider
+credentials. Accounts are unique per provider identity or guest installation
+key. Account creation grants 1,000 coins and 10 diamonds. The app uses that
+balance to initialize the local wallet. Existing game rewards and spending are
+device-local. The selected starter avatar is saved to the account.
+
 ### MetaPerson avatar generation
 
 Configure `METAPERSON_CLIENT_ID` and `METAPERSON_CLIENT_SECRET` on the server
@@ -74,7 +99,7 @@ Client to server:
 
 | Event | Payload | Notes |
 |---|---|---|
-| `identify` | `{ playerId, name }` | Must be first; playerId is the device id |
+| `identify` | `{ playerId, name, token? }` | Must be first. Account IDs require a session token. Older clients can use their device ID. |
 | `room:create` | — | Creator takes seat 0 and is auto-ready |
 | `room:join` | `{ code }` | 6 digits; same playerId rejoining is a reconnect |
 | `room:ready` | `{ ready }` | |

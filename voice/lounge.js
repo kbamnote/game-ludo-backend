@@ -132,14 +132,15 @@ async function toggleMic() {
   const audio = context
   el('mic').disabled = true
   try {
-    await audio.resume()
-    await audio.audioWorklet.addModule('./microphone.js')
-    if (request !== micRequest) return
+    // Start the permission request from the button gesture, before loading the processor.
     const media = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
     })
     if (request !== micRequest) { media.getTracks().forEach((track) => track.stop()); return }
     stream = media
+    await audio.resume()
+    await audio.audioWorklet.addModule('./microphone.js')
+    if (request !== micRequest) return
     input = audio.createMediaStreamSource(media)
     capture = new AudioWorkletNode(audio, 'voice-capture')
     capture.port.onmessage = ({ data }) => {

@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { serveAccounts, authenticatedAccount } from './accounts.js'
 import { Server, type Socket } from 'socket.io'
 import { privacyHtml } from './privacy.js'
 import { fitPortrait } from './fitPortrait.js'
@@ -34,6 +35,7 @@ const MATCH_SOUND_COUNT = 18
 
 const http = createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0]
+  if (path.startsWith('/auth/')) { void serveAccounts(req, res); return }
   if (path.startsWith('/avatars/metaperson/')) { void serveMetaPerson(req,res); return }
   if (path === '/avatars/fit') { void fitPortrait(req, res); return }
   if (serveVoice(path, res)) return
@@ -117,13 +119,18 @@ function performMove(room: Room, seat: Seat, tokenId: string) {
 /* ───────────────────────────── socket wiring ───────────────────────────── */
 
 io.on('connection', (socket) => {
-  socket.on('identify', (payload: { playerId?: string; name?: string }, ack?: (r: unknown) => void) => {
-    if (!payload?.playerId) {
+  socket.on('identify', (payload: { playerId?: string; name?: string; token?: string }, ack?: (r: unknown) => void) => {
+    const account = payload?.token ? authenticatedAccount(payload.token) : undefined
+    if ((payload?.token || (typeof payload?.playerId === 'string' && payload.playerId.startsWith('acct_'))) && !account) {
+      return ack?.({ ok: false, error: 'Sign in again to play online' })
+    }
+    const playerId = account?.id ?? payload?.playerId
+    if (typeof playerId !== 'string' || !playerId) {
       ack?.({ ok: false, error: 'playerId required' })
       return
     }
-    socket.data.playerId = payload.playerId
-    socket.data.name = (payload.name ?? 'Player').slice(0, 16)
+    socket.data.playerId = playerId
+    socket.data.name = (typeof payload.name === 'string' ? payload.name : account?.name ?? 'Player').slice(0, 16)
     ack?.({ ok: true })
   })
 

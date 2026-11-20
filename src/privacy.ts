@@ -1,15 +1,11 @@
 /**
  * Privacy policy served at /privacy.
  *
- * Play Console requires a publicly reachable policy URL and a Data Safety
- * declaration that matches it, so this describes exactly what the app does
- * today: a generated device id and a chosen nickname, held in memory only.
- * If the app ever gains analytics, ads, accounts or a database, this text has
- * to change with it.
+ * Keep this policy aligned with the app's account and gameplay data.
  */
 
 const APP_NAME = 'CGP - Cockroach Game Party'
-const UPDATED = '19 November 2026'
+const UPDATED = '20 November 2026'
 
 /** Overridable with CONTACT_EMAIL in the Railway service variables. */
 const CONTACT = process.env.CONTACT_EMAIL ?? 'kunalbamnote7@gmail.com'
@@ -65,20 +61,21 @@ export function privacyHtml(): string {
 
     <p>
       This policy explains how ${APP_NAME} handles game data and optional live voice.
-      The game uses a nickname so other players can tell you apart. There are no accounts,
-      no advertising, and no analytics or tracking software in the app.
+      You can sign in with Google or Facebook, or use a guest account.
+      The game uses a nickname so other players can tell you apart.
     </p>
 
     <h2>What the app collects</h2>
     <ul>
       <li>
-        <strong>A device identifier.</strong> The first time you open the app it generates a
-        random id (for example <code>p_m1x2y3_ab12cd34</code>). It is created on your device,
-        is not derived from your hardware, phone number, advertising id or any account, and
-        cannot be used to identify you personally.
+        <strong>Account information.</strong> We assign a game account ID and store a hashed
+        sign-in identifier, the starter balance and your selected starter avatar. For guest
+        play, the sign-in identifier comes from a randomly generated key on your device.
+        For Google and Facebook, it comes from the account identifier verified by that provider.
+        Your provider handles your password.
       </li>
       <li>
-        <strong>A nickname.</strong> Whatever you type. It is shown to the other players in a
+        <strong>A nickname.</strong> Your generated nickname or the one you choose. It is shown to the other players in a
         room. Please do not use your full name or any personal detail you would not want other
         players to see.
       </li>
@@ -113,8 +110,8 @@ export function privacyHtml(): string {
 
     <h2>Information kept on your device only</h2>
     <p>
-      Your in-game progress — coins, gems, level and reward timers — is stored on your device
-      and is never sent anywhere. Uninstalling the app deletes it permanently.
+      Game rewards, spending, level and reward timers are stored on your device.
+      The starter balance is stored with your account on the server.
     </p>
 
     <h2>How long the server keeps anything</h2>
@@ -122,8 +119,7 @@ export function privacyHtml(): string {
       Rooms exist only in the server's memory. Generated MetaPerson files are stored separately
       so your avatar is available for future matches. A room is discarded once it has been empty for 30 minutes, and every room is lost
       whenever the server restarts. The room holds the character appearance in memory.
-      Your nickname and device id live only inside the room you
-      are in and disappear with it.
+      Your account record and starter avatar persist between sessions.
     </p>
 
     <h2>Server logs</h2>
@@ -139,6 +135,7 @@ export function privacyHtml(): string {
       Other players in your match see your nickname and equipped character. Players in your voice room receive
       the audio you send while unmuted. Railway hosts the game server that delivers this
       data. Avatar SDK processes a portrait when you choose MetaPerson generation.
+      Google or Facebook processes your sign-in when you choose that provider.
       You choose who receives any room code you share.
     </p>
 
@@ -156,8 +153,7 @@ export function privacyHtml(): string {
         future matches, or reset to your seat character to erase the saved appearance.</li>
       <li>Creating a MetaPerson avatar requires a connection. Resetting your seat character
         unequips the avatar. Contact us to request deletion of its stored model.</li>
-      <li>Uninstall the app to erase everything stored on your device.</li>
-      <li>Ask us to delete anything associated with your device id, using the contact below.</li>
+      <li>Contact us using the address below to request deletion of your account data.</li>
     </ul>
 
     <h2>Security</h2>

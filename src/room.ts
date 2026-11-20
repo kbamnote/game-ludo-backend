@@ -14,6 +14,8 @@ import {
 export const MAX_SEATS = 4
 /** A seat that stalls this long has its turn played for it. */
 export const TURN_MS = 20_000
+// Keep in sync with the mobile coronation presentation.
+const CORONATION_MS = 8600
 /** Rooms with nobody connected are swept after this long. */
 export const ROOM_TTL_MS = 30 * 60_000
 
@@ -68,6 +70,7 @@ export interface MatchState {
   ranking: Seat[]
   /** Epoch ms by which the current seat must act. */
   deadline: number
+  coronationUntil: number
 }
 
 export interface Room {
@@ -238,6 +241,7 @@ export function startMatch(room: Room): MatchState {
     consecutiveSixes: 0,
     ranking: [],
     deadline: Date.now() + TURN_MS,
+    coronationUntil: 0,
   }
 
   room.match = match
@@ -257,6 +261,7 @@ export interface RollResult {
 export function doRoll(room: Room, seat: Seat): RollResult | { error: string } {
   const m = room.match
   if (!m || m.phase !== 'await-roll') return { error: 'Not accepting a roll' }
+  if (Date.now() < m.coronationUntil) return { error: 'Wait for the coronation to finish' }
   if (m.current !== seat) return { error: 'Not your turn' }
 
   const die = rollDie()
@@ -334,6 +339,11 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
 
   // Give the next decision its full turn clock after the rescue presentation.
   if (move.captures.length) m.deadline += path.length * 280 + move.captures.length * 6500
+  if (finished !== null && m.ranking.length <= 2) {
+    const presentation = path.length * 280 + CORONATION_MS
+    m.coronationUntil = Date.now() + presentation
+    m.deadline += presentation
+  }
   return { tokenId, path, captures: move.captures, finished, ended: false }
 }
 
