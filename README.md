@@ -58,10 +58,17 @@ is using at the bottom, which makes a misconfigured build obvious.
 
 ### Account onboarding
 
-Use Node 22.13 or newer. Attach a persistent volume to the Railway backend.
-The account database defaults to `accounts.sqlite` inside the mounted volume.
-Set `AUTH_DB_PATH` for a different database path on persistent storage. Local
-development defaults to `.accounts.sqlite`. Keep the backend on one replica.
+Use Node 22.13 or newer. Set `MONGODB_URI` in the Railway backend's service
+variables to enable MongoDB. The database name defaults to `cgp`. Set
+`MONGODB_DATABASE` to use a different name. Give the database user read and write
+access to the configured database and allow connections from the backend.
+
+The backend creates account, session, and OAuth collections with indexes on its
+first connection. Existing SQLite deployments can keep using the volume or
+`AUTH_DB_PATH` without setting `MONGODB_URI`. Switching to MongoDB uses that
+database's records. Export and import any existing player records before
+switching a live SQLite account store. Local development without MongoDB uses
+`.accounts.sqlite`.
 
 Set `AUTH_PUBLIC_URL` to the backend's public HTTPS origin. Configure these
 provider credentials as Railway service variables.

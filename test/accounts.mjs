@@ -4,6 +4,8 @@ import { createServer } from 'node:http'
 import { after, before, test } from 'node:test'
 
 process.env.AUTH_DB_PATH = ':memory:'
+process.env.MONGODB_URI = process.env.CGP_TEST_MONGODB_URI ?? ''
+process.env.MONGODB_DATABASE = 'cgp_account_test'
 process.env.AUTH_PUBLIC_URL = 'https://accounts.example.test'
 process.env.GOOGLE_CLIENT_ID = 'test-client'
 process.env.GOOGLE_CLIENT_SECRET = 'test-secret'
@@ -41,7 +43,7 @@ test('guest retries share one account and starter balance and restore the avatar
   assert.equal(account.coins, 1000)
   assert.equal(account.diamonds, 10)
   assert.equal(account.avatar, null)
-  assert.equal(authenticatedAccount(token).id, account.id)
+  assert.equal((await authenticatedAccount(token)).id, account.id)
   assert.equal((await call('avatar', { method: 'PUT', data: { avatar: 2 } })).status, 401)
   assert.equal((await call('avatar', { method: 'PUT', token, data: { avatar: 9 } })).status, 400)
   assert.equal((await call('avatar', { method: 'PUT', token, data: { avatar: 2 } })).result.avatar, 2)

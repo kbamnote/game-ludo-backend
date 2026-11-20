@@ -119,8 +119,14 @@ function performMove(room: Room, seat: Seat, tokenId: string) {
 /* ───────────────────────────── socket wiring ───────────────────────────── */
 
 io.on('connection', (socket) => {
-  socket.on('identify', (payload: { playerId?: string; name?: string; token?: string }, ack?: (r: unknown) => void) => {
-    const account = payload?.token ? authenticatedAccount(payload.token) : undefined
+  type IdentifyPayload = { playerId?: string; name?: string; token?: string }
+  async function identify(payload: IdentifyPayload | undefined, ack?: (r: unknown) => void) {
+    let account: Awaited<ReturnType<typeof authenticatedAccount>>
+    try {
+      account = payload?.token ? await authenticatedAccount(payload.token) : undefined
+    } catch {
+      return ack?.({ ok: false, error: 'Account service unavailable. Please try again.' })
+    }
     if ((payload?.token || (typeof payload?.playerId === 'string' && payload.playerId.startsWith('acct_'))) && !account) {
       return ack?.({ ok: false, error: 'Sign in again to play online' })
     }
@@ -130,8 +136,17 @@ io.on('connection', (socket) => {
       return
     }
     socket.data.playerId = playerId
-    socket.data.name = (typeof payload.name === 'string' ? payload.name : account?.name ?? 'Player').slice(0, 16)
+    socket.data.name = (typeof payload?.name === 'string' ? payload.name : account?.name ?? 'Player').slice(0, 16)
     ack?.({ ok: true })
+  }
+
+  let identification = Promise.resolve()
+  socket.use(([event, payload, reply], next) => {
+    if (event === 'identify') {
+      identification = identification.then(() => identify(payload, typeof reply === 'function' ? reply : undefined))
+    }
+    // Clients may send a room command immediately after identifying.
+    void identification.then(() => next(), () => next(new Error('Could not identify player')))
   })
 
   socket.on('room:create', (payload: { character?: unknown }, ack?: (r: unknown) => void) => {

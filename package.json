@@ -17,6 +17,7 @@
   "dependencies": {
     "face-api.js": "0.22.2",
     "fflate": "^0.8.2",
+    "mongodb": "^7.9.1",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
