@@ -11,6 +11,7 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 const randomKey = () => randomBytes(32).toString('hex')
 const publicUrl = process.env.AUTH_PUBLIC_URL?.replace(/\/$/, '')
 const webOrigin = process.env.AUTH_WEB_ORIGIN?.replace(/\/$/, '')
+const configuredExpoGoReturnUrl = expoGoUrl(process.env.AUTH_EXPO_GO_RETURN_URL)
 const facebookVersion = process.env.FACEBOOK_GRAPH_VERSION ?? 'v26.0'
 
 class HttpError extends Error {
@@ -53,6 +54,20 @@ function providerConfig(provider: Provider) {
   }
 }
 
+function expoGoUrl(value: unknown) {
+  if (typeof value !== 'string') return undefined
+  try {
+    const url = new URL(value.trim())
+    if ((url.protocol === 'exp:' || url.protocol === 'exps:') && url.hostname &&
+        url.pathname === '/--/onboarding' && !url.username && !url.password && !url.search && !url.hash) {
+      return url.href
+    }
+  } catch {
+    // An invalid preview URL is treated as unconfigured.
+  }
+  return undefined
+}
+
 function json(res: ServerResponse, status: number, payload: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
   res.end(JSON.stringify(payload))
@@ -77,13 +92,15 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 
 function callbackPage(res: ServerResponse, link?: string) {
-  const message = link ? 'Return to Cockroach Game Party to finish signing in.' : 'Sign-in could not be completed. Return to the game and try again.'
+  const message = link ? 'Opening Cockroach Game Party…' : 'Sign-in could not be completed. Return to the game and try again.'
+  const nonce = randomBytes(16).toString('base64')
   res.writeHead(link ? 200 : 400, {
     'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
-    'Content-Security-Policy': "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    'Content-Security-Policy': `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; script-src 'nonce-${nonce}'`,
   })
   res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CGP Sign-in</title><h1>' + message + '</h1>'
-    + (link ? '<p><a href="' + link + '">Return to the game</a></p>' : '') + '</html>')
+    + (link ? '<p>If the game doesn’t open, tap <a id="return-link" href="' + link + '">Return to the game</a>.</p>'
+      + '<script nonce="' + nonce + '">location.replace(document.getElementById("return-link").href)</script>' : '') + '</html>')
 }
 
 async function finishOAuth(res: ServerResponse, provider: Provider, params: URLSearchParams) {
@@ -126,8 +143,12 @@ async function finishOAuth(res: ServerResponse, provider: Provider, params: URLS
     const account = await accountFor(provider, digest(subject))
     const receipt = randomKey()
     await store.finishOAuth(state, { accountId: account.id, receiptHash: digest(receipt) })
-    const returnUrl = attempt.returnWeb ? new URL('/onboarding', webOrigin).href : 'cgp://onboarding'
-    return callbackPage(res, returnUrl + '?receipt=' + receipt)
+    const returnUrl = attempt.returnTarget === 'expoGo' ? configuredExpoGoReturnUrl
+      : attempt.returnTarget === 'web' ? new URL('/onboarding', webOrigin).href : 'cgp://onboarding'
+    if (!returnUrl) return callbackPage(res)
+    const link = new URL(returnUrl)
+    link.searchParams.set('receipt', receipt)
+    return callbackPage(res, link.href.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;'))
   } catch {
     await store.finishOAuth(state)
     return callbackPage(res)
@@ -154,19 +175,25 @@ export async function serveAccounts(req: IncomingMessage, res: ServerResponse) {
     if (req.method === 'GET' && pathname === '/auth/callback/google') return await finishOAuth(res, 'google', searchParams)
     if (req.method === 'GET' && pathname === '/auth/callback/facebook') return await finishOAuth(res, 'facebook', searchParams)
     if (req.method === 'POST' && pathname === '/auth/oauth/start') {
-      const { provider, web } = await body(req)
+      const { provider, web, expoGoReturnUrl } = await body(req)
       if (provider !== 'google' && provider !== 'facebook') throw new HttpError(400, 'Invalid sign-in provider')
       const config = providerConfig(provider)
       if (!config) throw new HttpError(503, 'This sign-in option is being set up. You can play as a guest.')
       if (web === true && !webOrigin?.startsWith('https://')) {
         throw new HttpError(503, 'Browser sign-in is unavailable. Open the game on your phone or play as a guest.')
       }
+      if (expoGoReturnUrl !== undefined && (!configuredExpoGoReturnUrl ||
+          web === true || expoGoUrl(expoGoReturnUrl) !== configuredExpoGoReturnUrl)) {
+        throw new HttpError(409, 'Set AUTH_EXPO_GO_RETURN_URL on the backend to match this Expo Go session.')
+      }
       const state = randomKey()
       const requestKey = randomKey()
       const verifier = randomKey()
+      const returnTarget = expoGoReturnUrl !== undefined ? 'expoGo' : web === true ? 'web' : 'app'
       const store = await accountStore()
       await store.startOAuth({
-        state, requestHash: digest(requestKey), provider, verifier, expires: Date.now() + LOGIN_MS, returnWeb: web === true,
+        state, requestHash: digest(requestKey), provider, verifier, expires: Date.now() + LOGIN_MS,
+        returnTarget,
       })
       const url = new URL(config.authorize)
       url.search = new URLSearchParams({
@@ -177,7 +204,7 @@ export async function serveAccounts(req: IncomingMessage, res: ServerResponse) {
         url.searchParams.set('code_challenge', createHash('sha256').update(verifier).digest('base64url'))
         url.searchParams.set('code_challenge_method', 'S256')
       }
-      return json(res, 200, { url: url.toString(), requestKey })
+      return json(res, 200, { url: url.toString(), requestKey, returnTarget })
     }
     if (req.method === 'POST' && pathname === '/auth/oauth/result') {
       const { requestKey, receipt } = await body(req)

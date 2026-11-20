@@ -4,6 +4,9 @@ import { MongoClient, MongoServerError } from 'mongodb'
 
 export type Provider = 'google' | 'facebook'
 export type Account = { id: string; name: string; coins: number; diamonds: number; avatar: number | null }
+type OAuthReturnTarget = 'app' | 'web' | 'expoGo'
+const returnTargets = ['app', 'web', 'expoGo'] as const
+type OAuthClaim = { verifier: string; returnTarget: OAuthReturnTarget }
 type AccountRecord = Account & { provider: Provider | 'guest'; subject: string }
 type OAuthStart = {
   state: string
@@ -11,7 +14,7 @@ type OAuthStart = {
   provider: Provider
   verifier: string
   expires: number
-  returnWeb: boolean
+  returnTarget: OAuthReturnTarget
 }
 
 interface AccountStore {
@@ -20,7 +23,7 @@ interface AccountStore {
   saveSession(hash: string, accountId: string, expires: number): void | Promise<void>
   sessionAccount(hash: string): Account | undefined | Promise<Account | undefined>
   startOAuth(attempt: OAuthStart): void | Promise<void>
-  claimOAuth(state: string, provider: Provider): { verifier: string; returnWeb: boolean } | undefined | Promise<{ verifier: string; returnWeb: boolean } | undefined>
+  claimOAuth(state: string, provider: Provider): OAuthClaim | undefined | Promise<OAuthClaim | undefined>
   finishOAuth(state: string, result?: { accountId: string; receiptHash: string }): void | Promise<void>
   oauthAccount(requestHash: string, receiptHash: string): Account | undefined | Promise<Account | undefined>
 }
@@ -87,16 +90,17 @@ function sqliteStore(file: string): AccountStore {
         .get(hash, Date.now()) as { account_id: string } | undefined
       return session && getAccount(session.account_id)
     },
-    startOAuth({ state, requestHash, provider, verifier, expires, returnWeb }) {
+    startOAuth({ state, requestHash, provider, verifier, expires, returnTarget }) {
       db.prepare('DELETE FROM oauth WHERE expires <= ?').run(Date.now())
       db.prepare('INSERT INTO oauth (state, request_hash, provider, verifier, expires, return_web) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(state, requestHash, provider, verifier, expires, Number(returnWeb))
+        .run(state, requestHash, provider, verifier, expires, returnTargets.indexOf(returnTarget))
     },
     claimOAuth(state, provider) {
       const attempt = db.prepare(`UPDATE oauth SET status = 'exchanging'
         WHERE state = ? AND provider = ? AND expires > ? AND status = 'pending' RETURNING verifier, return_web`)
         .get(state, provider, Date.now()) as { verifier: string; return_web: number } | undefined
-      return attempt && { verifier: attempt.verifier, returnWeb: !!attempt.return_web }
+      // Keep the existing 0/1 encoding for app and web attempts.
+      return attempt && { verifier: attempt.verifier, returnTarget: returnTargets[attempt.return_web] ?? 'app' }
     },
     finishOAuth(state, result) {
       db.prepare('UPDATE oauth SET status = ?, account_id = ?, receipt_hash = ? WHERE state = ?')
@@ -118,6 +122,7 @@ type MongoAttempt = Omit<OAuthStart, 'expires' | 'state'> & {
   status: 'pending' | 'exchanging' | 'done' | 'failed'
   accountId?: string
   receiptHash?: string
+  returnWeb?: boolean
 }
 
 function publicAccount(row: MongoAccount): Account {
@@ -188,7 +193,10 @@ async function mongoStore(uri: string): Promise<AccountStore> {
         { _id: state, provider, expires: { $gt: new Date() }, status: 'pending' },
         { $set: { status: 'exchanging' } },
       )
-      return attempt ? { verifier: attempt.verifier, returnWeb: attempt.returnWeb } : undefined
+      return attempt ? {
+        verifier: attempt.verifier,
+        returnTarget: attempt.returnTarget ?? (attempt.returnWeb ? 'web' : 'app'),
+      } : undefined
     },
     async finishOAuth(state, result) {
       await oauth.updateOne({ _id: state, status: 'exchanging' },

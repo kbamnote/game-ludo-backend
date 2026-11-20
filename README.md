@@ -78,9 +78,12 @@ provider credentials as Railway service variables.
 | Google OAuth Web application | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `<AUTH_PUBLIC_URL>/auth/callback/google` |
 | Facebook Login | `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET` | `<AUTH_PUBLIC_URL>/auth/callback/facebook` |
 
-The callback returns mobile players to the app's `cgp` scheme. Test social
-sign-in in an installed CGP development or release build. For a hosted web app,
-set `AUTH_WEB_ORIGIN` to its HTTPS origin so the callback can return there.
+The callback uses the installed app's `cgp` scheme. For an Expo Go test, set
+`AUTH_EXPO_GO_RETURN_URL` to its exact Metro deep link, for example
+`exp://192.168.1.25:8081/--/onboarding`, in the backend environment and redeploy.
+Use the `exp://` or `exps://` base printed by Metro, followed by `/--/onboarding`.
+For hosted web testing, set `AUTH_WEB_ORIGIN` to the web app's HTTPS origin.
+Keep the provider's authorized HTTPS callback URI as listed above in each case.
 
 Guest play uses the same account database and works without social-provider
 credentials. Accounts are unique per provider identity or guest installation

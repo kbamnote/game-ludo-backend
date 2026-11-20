@@ -7,6 +7,8 @@ process.env.AUTH_DB_PATH = ':memory:'
 process.env.MONGODB_URI = process.env.CGP_TEST_MONGODB_URI ?? ''
 process.env.MONGODB_DATABASE = 'cgp_account_test'
 process.env.AUTH_PUBLIC_URL = 'https://accounts.example.test'
+process.env.AUTH_WEB_ORIGIN = 'https://game.example.test'
+process.env.AUTH_EXPO_GO_RETURN_URL = 'exp://192.168.1.25:8081/--/onboarding'
 process.env.GOOGLE_CLIENT_ID = 'test-client'
 process.env.GOOGLE_CLIENT_SECRET = 'test-secret'
 process.env.FACEBOOK_APP_ID = 'test-app'
@@ -61,8 +63,9 @@ test('social sign-in requires both the device key and the provider callback rece
     return Response.json({ sub: 'google-person', id: 'facebook-person' })
   })
 
-  async function authorize(provider) {
-    const { result: { url, requestKey } } = await call('oauth/start', { method: 'POST', data: { provider } })
+  async function authorize(provider, settings = {}, returnUrl = 'cgp://onboarding', target = 'app') {
+    const { result: { url, requestKey, returnTarget } } = await call('oauth/start', { method: 'POST', data: { provider, ...settings } })
+    assert.equal(returnTarget, target)
     const params = new URL(url).searchParams
     assert.equal(params.get('redirect_uri'), 'https://accounts.example.test/auth/callback/' + provider)
     if (provider === 'google') assert.equal(params.get('code_challenge_method'), 'S256')
@@ -70,7 +73,12 @@ test('social sign-in requires both the device key and the provider callback rece
     assert.equal((await call('callback/' + provider + '?code=test&state=invalid')).status, 400)
     const verified = await call('callback/' + provider + '?code=test&state=' + state)
     assert.equal(verified.status, 200)
-    const receipt = verified.result.match(/cgp:\/\/onboarding\?receipt=([a-f0-9]{64})/)[1]
+    assert.match(verified.result, /location\.replace\(document\.getElementById\("return-link"\)\.href\)/)
+    const link = new URL(verified.result.match(/id="return-link" href="([^"]+)"/)[1])
+    const receipt = link.searchParams.get('receipt')
+    assert.match(receipt, /^[a-f0-9]{64}$/)
+    link.search = ''
+    assert.equal(link.href, returnUrl)
     assert.equal((await call('oauth/result', { method: 'POST', data: { requestKey, receipt: 'a'.repeat(64) } })).status, 410)
     assert.equal((await call('oauth/result', { method: 'POST', data: { requestKey: 'b'.repeat(64), receipt } })).status, 410)
     assert.equal((await call('callback/' + provider + '?code=test&state=' + state)).status, 400)
@@ -85,5 +93,15 @@ test('social sign-in requires both the device key and the provider callback rece
     assert.equal(repeat.account.avatar, 3)
     assert.equal(repeat.account.coins, 1000)
     assert.equal(repeat.account.diamonds, 10)
+  }
+
+  const expoGoReturnUrl = process.env.AUTH_EXPO_GO_RETURN_URL
+  const preview = await authorize('google', { expoGoReturnUrl }, expoGoReturnUrl, 'expoGo')
+  assert.equal(preview.account.avatar, 3)
+  assert.equal((await authorize('google', { web: true }, 'https://game.example.test/onboarding', 'web')).account.id, preview.account.id)
+
+  for (const rejected of ['exp://different-host:8081/--/onboarding', expoGoReturnUrl + '?redirect=extra', 'https://other.example.test/onboarding']) {
+    const result = await call('oauth/start', { method: 'POST', data: { provider: 'google', expoGoReturnUrl: rejected } })
+    assert.equal(result.status, 409)
   }
 })
