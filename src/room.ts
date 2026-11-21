@@ -21,6 +21,9 @@ export const ROOM_TTL_MS = 30 * 60_000
 
 export type RoomPhase = 'lobby' | 'playing' | 'finished'
 export type MatchPhase = 'await-roll' | 'await-move' | 'ended'
+export type GameVariant = 'classic' | 'teams' | 'quick'
+const seatOrder: Seat[] = [0, 1, 2, 3]
+const friendsSeatOrder: Seat[] = [0, 2, 1, 3]
 
 interface Character {
   model: Seat | 4
@@ -75,6 +78,7 @@ export interface MatchState {
 
 export interface Room {
   publicTable: boolean
+  variant: GameVariant
   code: string
   hostId: string
   members: Member[]
@@ -87,6 +91,7 @@ export interface Room {
 /** What a client is allowed to see. Identical for every member. */
 export interface RoomSnapshot {
   publicTable: boolean
+  variant: GameVariant
   code: string
   hostId: string
   phase: RoomPhase
@@ -117,6 +122,7 @@ export function createRoom(playerId: string, name: string, publicTable = false, 
 
   const room: Room = {
     publicTable,
+    variant: 'classic',
     code,
     hostId: playerId,
     members: [{ playerId, name, character, socketId: null, seat: 0, ready: true, connected: true }],
@@ -162,12 +168,19 @@ export function joinRoom(code: string, playerId: string, name: string, socketId:
   if (room.phase !== 'lobby') return { ok: false, error: 'That match has already started' }
 
   const taken = new Set(room.members.map((m) => m.seat))
-  const seat = ([0, 1, 2, 3] as Seat[]).find((s) => !taken.has(s))
+  const seat = (room.publicTable ? seatOrder : friendsSeatOrder).find((s) => !taken.has(s))
   if (seat === undefined) return { ok: false, error: 'Room is full' }
 
   room.members.push({ playerId, name, character, socketId, seat, ready: false, connected: true })
+  alignOppositeSeats(room)
   room.lastActivity = Date.now()
   return { ok: true, room }
+}
+
+function alignOppositeSeats(room: Room) {
+  if (room.publicTable || room.phase !== 'lobby' || room.members.length !== 2) return
+  const [first, second] = room.members
+  if (first.seat !== null) second.seat = ((first.seat + 2) % MAX_SEATS) as Seat
 }
 
 export function bindSocket(room: Room, playerId: string, socketId: string) {
@@ -195,6 +208,7 @@ export function markDisconnected(socketId: string): Room | undefined {
     if (room.hostId === member.playerId && room.members.length > 0) {
       room.hostId = room.members[0].playerId
     }
+    alignOppositeSeats(room)
   }
 
   room.lastActivity = Date.now()
@@ -205,6 +219,7 @@ export function markDisconnected(socketId: string): Room | undefined {
 export function leaveRoom(room: Room, playerId: string) {
   room.members = room.members.filter((m) => m.playerId !== playerId)
   if (room.hostId === playerId && room.members.length > 0) room.hostId = room.members[0].playerId
+  alignOppositeSeats(room)
   if (room.members.length === 0) rooms.delete(room.code)
   room.lastActivity = Date.now()
 }
@@ -215,11 +230,23 @@ export function setReady(room: Room, playerId: string, ready: boolean) {
   room.lastActivity = Date.now()
 }
 
+export function setRoomVariant(room: Room, playerId: string, variant: unknown): string | null {
+  if (room.publicTable || room.phase !== 'lobby' || room.hostId !== playerId) return 'Only the Friends room host can change the game before it starts'
+  if (variant !== 'classic' && variant !== 'teams' && variant !== 'quick') return 'Invalid game mode'
+  if (variant !== room.variant) {
+    room.variant = variant
+    for (const member of room.members) member.ready = member.playerId === playerId
+    room.lastActivity = Date.now()
+  }
+  return null
+}
+
 /* ───────────────────────────── match ───────────────────────────── */
 
 export function canStart(room: Room): string | null {
   if (room.phase !== 'lobby') return 'Match already started'
   const seated = room.members.filter((m) => m.seat !== null)
+  if (room.variant === 'teams' && seated.length !== 4) return 'Team Up needs 4 players'
   if (seated.length < 2) return 'Need at least 2 players'
   if (!seated.every((m) => m.ready)) return 'Everyone must be ready'
   return null
@@ -276,7 +303,7 @@ export function doRoll(room: Room, seat: Seat): RollResult | { error: string } {
     return { die, moves: [], passed: true }
   }
 
-  const moves = legalMoves(m.tokens, seat, die)
+  const moves = legalMoves(m.tokens, seat, die, room.variant === 'teams')
   m.moves = moves
 
   if (moves.length === 0) {
@@ -316,8 +343,19 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
   m.moves = []
   room.lastActivity = Date.now()
 
+  const partner = ((seat + 2) % MAX_SEATS) as Seat
+  const finishedSeat = hasWon(m.tokens, seat)
+  const quickWinner = room.variant === 'quick' && move.finishes
+  const teamWinner = room.variant === 'teams' && finishedSeat && hasWon(m.tokens, partner)
+  if (quickWinner || teamWinner) {
+    m.ranking = teamWinner ? [seat, partner] : [seat]
+    m.phase = 'ended'
+    room.phase = 'finished'
+    return { tokenId, path, captures: move.captures, finished: seat, ended: true }
+  }
+
   let finished: Seat | null = null
-  if (hasWon(m.tokens, seat) && !m.ranking.includes(seat)) {
+  if (finishedSeat && !m.ranking.includes(seat)) {
     m.ranking.push(seat)
     finished = seat
   }
@@ -339,7 +377,7 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
 
   // Give the next decision its full turn clock after the rescue presentation.
   if (move.captures.length) m.deadline += path.length * 280 + move.captures.length * 6500
-  if (finished !== null && m.ranking.length <= 2) {
+  if (room.variant !== 'teams' && finished !== null && m.ranking.length <= 2) {
     const presentation = path.length * 280 + CORONATION_MS
     m.coronationUntil = Date.now() + presentation
     m.deadline += presentation
@@ -392,6 +430,7 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
     code: room.code,
     hostId: room.hostId,
     publicTable: room.publicTable,
+    variant: room.variant,
     phase: room.phase,
     members: room.members.map((m) => ({
       playerId: m.playerId,

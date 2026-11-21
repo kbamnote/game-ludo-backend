@@ -3,11 +3,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { MongoClient, MongoServerError } from 'mongodb'
 
 export type Provider = 'google' | 'facebook'
-export type Account = { id: string; name: string; coins: number; diamonds: number; avatar: number | null }
+export type Account = { id: string; provider: Provider | 'guest'; name: string; coins: number; diamonds: number; avatar: number | null }
 type OAuthReturnTarget = 'app' | 'web' | 'expoGo'
 const returnTargets = ['app', 'web', 'expoGo'] as const
 type OAuthClaim = { verifier: string; returnTarget: OAuthReturnTarget }
-type AccountRecord = Account & { provider: Provider | 'guest'; subject: string }
+type AccountRecord = Account & { subject: string }
 type OAuthStart = {
   state: string
   requestHash: string
@@ -19,6 +19,7 @@ type OAuthStart = {
 
 interface AccountStore {
   createAccount(input: AccountRecord): Account | Promise<Account>
+  replaceAccountName(id: string, previous: string, name: string): Account | undefined | Promise<Account | undefined>
   saveAvatar(id: string, avatar: number): Account | undefined | Promise<Account | undefined>
   saveSession(hash: string, accountId: string, expires: number): void | Promise<void>
   sessionAccount(hash: string): Account | undefined | Promise<Account | undefined>
@@ -68,13 +69,17 @@ function sqliteStore(file: string): AccountStore {
     db.close()
     throw error
   }
-  const fields = 'id, name, coins, diamonds, avatar'
+  const fields = 'id, provider, name, coins, diamonds, avatar'
   const getAccount = (id: string) => db.prepare('SELECT ' + fields + ' FROM accounts WHERE id = ?').get(id) as Account | undefined
   return {
     createAccount({ id, provider, subject, name, coins, diamonds }) {
       db.prepare(`INSERT INTO accounts (id, provider, subject, name, coins, diamonds)
         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(provider, subject) DO NOTHING`).run(id, provider, subject, name, coins, diamonds)
       return db.prepare('SELECT ' + fields + ' FROM accounts WHERE provider = ? AND subject = ?').get(provider, subject) as Account
+    },
+    replaceAccountName(id, previous, name) {
+      db.prepare('UPDATE accounts SET name = ? WHERE id = ? AND name = ?').run(name, id, previous)
+      return getAccount(id)
     },
     saveAvatar(id, avatar) {
       db.prepare('UPDATE accounts SET avatar = ? WHERE id = ?').run(avatar, id)
@@ -126,7 +131,7 @@ type MongoAttempt = Omit<OAuthStart, 'expires' | 'state'> & {
 }
 
 function publicAccount(row: MongoAccount): Account {
-  return { id: row._id, name: row.name, coins: row.coins, diamonds: row.diamonds, avatar: row.avatar }
+  return { id: row._id, provider: row.provider, name: row.name, coins: row.coins, diamonds: row.diamonds, avatar: row.avatar }
 }
 
 async function mongoStore(uri: string): Promise<AccountStore> {
@@ -173,6 +178,10 @@ async function mongoStore(uri: string): Promise<AccountStore> {
         throw error
       }
       throw new Error('Account could not be created')
+    },
+    async replaceAccountName(id, previous, name) {
+      const row = await accounts.findOneAndUpdate({ _id: id, name: previous }, { $set: { name } }, { returnDocument: 'after' })
+      return row ? publicAccount(row) : getAccount(id)
     },
     async saveAvatar(id, avatar) {
       const row = await accounts.findOneAndUpdate({ _id: id }, { $set: { avatar } }, { returnDocument: 'after' })

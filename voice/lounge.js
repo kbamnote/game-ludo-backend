@@ -5,11 +5,14 @@ const nameField = el('name')
 const codeField = el('code')
 const params = new URLSearchParams(location.hash.slice(1))
 const matchTicket = params.get('match')
+const autoJoinMatch = !!matchTicket && params.get('auto') === '1'
+const autoStartMic = autoJoinMatch && params.get('mic') === '1'
+let startMatchMic = autoStartMic
 nameField.value = params.get('name')?.slice(0, 16) || 'Player'
 if (matchTicket) {
   document.documentElement.classList.add('match-chat')
   el('setup').hidden = true
-  el('matchSetup').hidden = false
+  el('matchSetup').hidden = autoJoinMatch
 }
 let socket = null
 let context = null
@@ -48,7 +51,7 @@ function leave(message = '') {
   }
   playAt.clear()
   el('setup').hidden = Boolean(matchTicket)
-  el('matchSetup').hidden = !matchTicket
+  el('matchSetup').hidden = !matchTicket || autoJoinMatch
   el('lounge').hidden = true
   el('create').disabled = el('join').disabled = el('joinMatch').disabled = false
   notice(message)
@@ -119,7 +122,13 @@ function enter(create) {
       el('matchSetup').hidden = true
       el('lounge').hidden = false
       roster(reply.members)
-      notice('Microphone muted. Unmute when you want to speak.')
+      el('mic').hidden = autoJoinMatch && !autoStartMic
+      if (startMatchMic && !document.hidden) {
+        notice('Starting microphone…')
+        void toggleMic()
+      } else {
+        notice(autoJoinMatch ? 'Listening to match voice.' : 'Microphone muted. Unmute when you want to speak.')
+      }
     })
   })
   session.connect()
@@ -138,7 +147,7 @@ async function toggleMic() {
     })
     if (request !== micRequest) { media.getTracks().forEach((track) => track.stop()); return }
     stream = media
-    await audio.resume()
+    void audio.resume().catch(() => { el('resume').hidden = false })
     await audio.audioWorklet.addModule('./microphone.js')
     if (request !== micRequest) return
     input = audio.createMediaStreamSource(media)
@@ -176,6 +185,7 @@ el('invite').onclick = async () => {
   } catch { notice('Share this room code with your friends: ' + roomCode) }
 }
 function pauseVoice() {
+  startMatchMic = false
   if (!roomCode) return
   stopMic()
   notice('Microphone muted while you were away.')
@@ -183,3 +193,4 @@ function pauseVoice() {
 document.addEventListener('visibilitychange', () => { if (document.hidden) pauseVoice() })
 document.addEventListener('voice-background', pauseVoice)
 window.addEventListener('pagehide', () => leave())
+if (autoJoinMatch) enter(false)

@@ -7,6 +7,7 @@ const WELCOME_DIAMONDS = 10
 const SESSION_MS = 90 * 24 * 60 * 60 * 1000
 const LOGIN_MS = 5 * 60 * 1000
 const keyPattern = /^[a-f0-9]{64}$/
+const generatedNamePattern = /^Player [a-f0-9]{4}$/
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 const randomKey = () => randomBytes(32).toString('hex')
 const publicUrl = process.env.AUTH_PUBLIC_URL?.replace(/\/$/, '')
@@ -18,13 +19,17 @@ class HttpError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 
-async function accountFor(provider: Provider | 'guest', subject: string) {
+async function accountFor(provider: Provider | 'guest', subject: string, displayName?: string) {
   const store = await accountStore()
-  return store.createAccount({
+  const account = await store.createAccount({
     id: 'acct_' + randomUUID(), provider, subject,
-    name: 'Player ' + randomBytes(2).toString('hex'),
+    name: displayName || 'Player ' + randomBytes(2).toString('hex'),
     coins: WELCOME_COINS, diamonds: WELCOME_DIAMONDS, avatar: null,
   })
+  if (displayName && account.name !== displayName && generatedNamePattern.test(account.name)) {
+    return await store.replaceAccountName(account.id, account.name, displayName) ?? account
+  }
+  return account
 }
 
 async function sessionFor(account: Account, secret: string) {
@@ -137,10 +142,13 @@ async function finishOAuth(res: ServerResponse, provider: Provider, params: URLS
       headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(12000),
     })
     if (!profileRes.ok) throw new Error()
-    const profile = await profileRes.json() as { sub?: string; id?: string }
+    const profile = await profileRes.json() as { sub?: string; id?: string; name?: unknown }
     const subject = provider === 'google' ? profile.sub : profile.id
     if (typeof subject !== 'string' || !subject || subject.length > 256) throw new Error()
-    const account = await accountFor(provider, digest(subject))
+    const displayName = provider === 'google' && typeof profile.name === 'string'
+      ? profile.name.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, 16).replace(/[\uD800-\uDBFF]$/, '').trimEnd()
+      : undefined
+    const account = await accountFor(provider, digest(subject), displayName)
     const receipt = randomKey()
     await store.finishOAuth(state, { accountId: account.id, receiptHash: digest(receipt) })
     const returnUrl = attempt.returnTarget === 'expoGo' ? configuredExpoGoReturnUrl
@@ -198,7 +206,7 @@ export async function serveAccounts(req: IncomingMessage, res: ServerResponse) {
       const url = new URL(config.authorize)
       url.search = new URLSearchParams({
         client_id: config.id, redirect_uri: config.redirect, response_type: 'code',
-        scope: provider === 'google' ? 'openid' : 'public_profile', state,
+        scope: provider === 'google' ? 'openid profile' : 'public_profile', state,
       }).toString()
       if (provider === 'google') {
         url.searchParams.set('code_challenge', createHash('sha256').update(verifier).digest('base64url'))

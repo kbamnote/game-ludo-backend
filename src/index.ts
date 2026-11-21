@@ -20,6 +20,7 @@ import {
   readCharacter,
   roomOfSocket,
   setReady,
+  setRoomVariant,
   snapshot,
   startMatch,
   sweepIdleRooms,
@@ -32,6 +33,8 @@ const reactions = new Set(['knife', 'heart', 'cactus', 'orange', 'snowball', 'du
 const reactionAvailableAt = new WeakMap<Room, number>()
 const soundAvailableAt = new WeakMap<Room, number>()
 const MATCH_SOUND_COUNT = 18
+// Let the Friends dice finish rolling before the only legal move is played.
+const FORCED_MOVE_DELAY_MS = 1030
 
 const http = createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0]
@@ -98,6 +101,15 @@ function performRoll(room: Room, seat: Seat) {
     passed: result.passed,
   })
   publish(room)
+  if (!room.publicTable && result.moves.length === 1 && room.match) {
+    const match = room.match
+    const moves = result.moves
+    setTimeout(() => {
+      if (room.match === match && match.phase === 'await-move' && match.moves === moves) {
+        performMove(room, seat, moves[0].tokenId)
+      }
+    }, FORCED_MOVE_DELAY_MS).unref()
+  }
   return result
 }
 
@@ -195,6 +207,16 @@ io.on('connection', (socket) => {
     const room = roomOfSocket(socket.id)
     if (!me || !room) return
     setReady(room, me.playerId, !!payload?.ready)
+    publish(room)
+  })
+
+  socket.on('room:variant', (payload: { variant?: unknown }, ack?: (r: unknown) => void) => {
+    const me = identityOf(socket)
+    const room = roomOfSocket(socket.id)
+    if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
+    const error = setRoomVariant(room, me.playerId, payload?.variant)
+    if (error) return ack?.({ ok: false, error })
+    ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
   })
 

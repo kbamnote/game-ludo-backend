@@ -46,11 +46,18 @@ try {
 
 const joined = await call(b, 'room:join', { code, character: { model: 1, face: 'invalid texture' } })
 if (!joined.ok) throw new Error('join failed: ' + joined.error)
+assert.deepEqual(joined.snapshot.members.map(member => member.seat), [0, 2])
 log('bravo joined; members:', joined.snapshot.members.map((m) => `${m.name}@seat${m.seat}`).join(', '))
 
 // Reject a bad code and a duplicate-seat overflow path
 const bad = await call(b, 'room:join', { code: '000000' })
 log('bad code rejected:', bad.ok === false, '-', bad.error)
+
+assert.equal((await call(b, 'room:variant', { variant: 'quick' })).ok, false)
+assert.equal((await call(a, 'room:variant', { variant: 'quick' })).snapshot.variant, 'quick')
+assert.equal((await call(a, 'room:variant', { variant: 'teams' })).snapshot.variant, 'teams')
+assert.match((await call(a, 'room:start')).error, /4 players/)
+assert.equal((await call(a, 'room:variant', { variant: 'classic' })).snapshot.variant, 'classic')
 
 b.emit('room:ready', { ready: true })
 a.emit('room:ready', { ready: true })
@@ -73,12 +80,12 @@ assert.ok(latest().members.every(member => !('character' in member)))
 const notHost = await call(b, 'room:start')
 log('non-host start blocked:', notHost.ok === false)
 
-const seatOf = { Alpha: 0, Bravo: 1 }
-const sockets = { 0: a, 1: b }
+const sockets = { 0: a, 2: b }
 await new Promise((r) => setTimeout(r, 200))
 
 let turns = 0
 let moves = 0
+let forced = false
 const deadline = Date.now() + 25000
 
 while (Date.now() < deadline && turns < 400) {
@@ -95,6 +102,16 @@ while (Date.now() < deadline && turns < 400) {
   } else if (snap.match.phase === 'await-move') {
     const ids = snap.match.movableTokenIds
     if (!ids.length) { await new Promise((r) => setTimeout(r, 30)); continue }
+    if (ids.length === 1 && !forced) {
+      const results = await Promise.all([a, b].map(client => new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('The sole legal move was not played automatically')), 2200)
+        client.once('match:moved', moved => { clearTimeout(timeout); resolve(moved) })
+      })))
+      for (const moved of results) assert.equal(moved.tokenId, ids[0])
+      forced = true
+      moves++
+      continue
+    }
     const r = await call(s, 'match:move', { tokenId: ids[0] })
     if (!r.ok) { log('move rejected:', r.error); break }
     moves++
@@ -103,6 +120,7 @@ while (Date.now() < deadline && turns < 400) {
 }
 
 const fin = latest()
+assert.ok(forced, 'the match should broadcast one forced move to both clients')
 log(`\nplayed ${turns} rolls / ${moves} moves`)
 log('match phase:', fin?.match?.phase)
 log('tokens home:', fin?.match?.tokens.filter((t) => t.progress === 56).length)

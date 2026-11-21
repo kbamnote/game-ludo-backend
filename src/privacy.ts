@@ -5,7 +5,7 @@
  */
 
 const APP_NAME = 'CGP - Cockroach Game Party'
-const UPDATED = '20 November 2026'
+const UPDATED = '21 November 2026'
 
 /** Overridable with CONTACT_EMAIL in the Railway service variables. */
 const CONTACT = process.env.CONTACT_EMAIL ?? 'kunalbamnote7@gmail.com'
@@ -75,16 +75,16 @@ export function privacyHtml(): string {
         Your provider handles your password.
       </li>
       <li>
-        <strong>A nickname.</strong> Your generated nickname or the one you choose. It is shown to the other players in a
-        room. Please do not use your full name or any personal detail you would not want other
-        players to see.
+        <strong>A display name.</strong> When you sign in with Google, we save your Google
+        profile name as your default game name, up to 16 characters. Other players can see
+        your game name in a room. You can change it in Player settings.
       </li>
       <li>
         <strong>Gameplay actions while you are in an online room.</strong> Room codes, dice
         rolls and piece moves, so the server can referee the match.
       </li>
-      <li><strong>Optional voice chat.</strong> Voice Adda and Friends match voice chat start muted. When you
-        unmute and allow microphone access, the game server relays live microphone audio
+      <li><strong>Optional voice chat.</strong> Your microphone starts off. When you turn it on in a Friends
+        match or unmute in Voice Adda and allow access, the game server relays live microphone audio
         to the other players in that voice room. The game does not record or store audio.
         Muting, leaving, or closing the lounge stops microphone capture.</li>
       <li><strong>Optional character appearance.</strong> You can choose a character and
@@ -103,7 +103,7 @@ export function privacyHtml(): string {
 
     <h2>What the app does not collect</h2>
     <p>
-      No legal name, email address, phone number, date of birth, location, contacts,
+      No email address, phone number, date of birth, location, contacts,
       camera data, or payment information. The app contains no advertising
       network, no analytics and no crash-reporting service.
     </p>

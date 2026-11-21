@@ -166,7 +166,7 @@ function tokensOnSameCell(tokens: Token[], seat: Seat, progress: number): Token[
  * A cell holding two or more tokens of one colour is a blockade: no opposing
  * token may land on it, and captures there do not happen.
  */
-export function legalMoves(tokens: Token[], seat: Seat, die: number): Move[] {
+export function legalMoves(tokens: Token[], seat: Seat, die: number, teams = false): Move[] {
   const moves: Move[] = []
 
   for (const token of tokens) {
@@ -196,7 +196,7 @@ export function legalMoves(tokens: Token[], seat: Seat, die: number): Move[] {
       (t) => t.id !== token.id && t.progress >= 0 && t.progress <= LAST_TRACK_STEP && trackIndexFor(t.seat, t.progress) === landingIdx,
     )
 
-    const enemies = occupants.filter((t) => t.seat !== seat)
+    const enemies = occupants.filter((t) => t.seat !== seat && (!teams || t.seat % 2 !== seat % 2))
     const enemyBlockade = enemies.length >= 2 && enemies.every((t) => t.seat === enemies[0].seat)
     if (enemyBlockade) continue // cannot pass through or land on a blockade
 

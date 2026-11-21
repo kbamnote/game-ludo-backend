@@ -54,13 +54,15 @@ test('guest retries share one account and starter balance and restore the avatar
 })
 
 test('social sign-in requires both the device key and the provider callback receipt', async (t) => {
+  let googleSubject = 'google-person'
+  let googleName
   t.mock.method(globalThis, 'fetch', async (input) => {
     const url = new URL(input)
     if (url.pathname.endsWith('/token') || url.pathname.endsWith('/access_token')) {
       return Response.json({ access_token: 'test-provider-token' })
     }
     assert.ok(url.pathname.endsWith('/userinfo') || url.pathname.endsWith('/me'))
-    return Response.json({ sub: 'google-person', id: 'facebook-person' })
+    return Response.json({ sub: googleSubject, id: 'facebook-person', name: googleName })
   })
 
   async function authorize(provider, settings = {}, returnUrl = 'cgp://onboarding', target = 'app') {
@@ -68,6 +70,7 @@ test('social sign-in requires both the device key and the provider callback rece
     assert.equal(returnTarget, target)
     const params = new URL(url).searchParams
     assert.equal(params.get('redirect_uri'), 'https://accounts.example.test/auth/callback/' + provider)
+    assert.equal(params.get('scope'), provider === 'google' ? 'openid profile' : 'public_profile')
     if (provider === 'google') assert.equal(params.get('code_challenge_method'), 'S256')
     const state = params.get('state')
     assert.equal((await call('callback/' + provider + '?code=test&state=invalid')).status, 400)
@@ -85,8 +88,11 @@ test('social sign-in requires both the device key and the provider callback rece
     return (await call('oauth/result', { method: 'POST', data: { requestKey, receipt } })).result
   }
 
+  const initialAccounts = new Map()
   for (const provider of ['google', 'facebook']) {
     const initial = await authorize(provider)
+    initialAccounts.set(provider, initial.account)
+    assert.match(initial.account.name, /^Player [a-f0-9]{4}$/)
     await call('avatar', { method: 'PUT', token: initial.token, data: { avatar: 3 } })
     const repeat = await authorize(provider)
     assert.equal(repeat.account.id, initial.account.id)
@@ -95,10 +101,23 @@ test('social sign-in requires both the device key and the provider callback rece
     assert.equal(repeat.account.diamonds, 10)
   }
 
+  googleName = '  Asha Verma  '
   const expoGoReturnUrl = process.env.AUTH_EXPO_GO_RETURN_URL
   const preview = await authorize('google', { expoGoReturnUrl }, expoGoReturnUrl, 'expoGo')
+  assert.equal(preview.account.id, initialAccounts.get('google').id)
+  assert.equal(preview.account.name, 'Asha Verma')
   assert.equal(preview.account.avatar, 3)
-  assert.equal((await authorize('google', { web: true }, 'https://game.example.test/onboarding', 'web')).account.id, preview.account.id)
+  googleName = 'A Changed Name'
+  const returned = await authorize('google', { web: true }, 'https://game.example.test/onboarding', 'web')
+  assert.equal(returned.account.id, preview.account.id)
+  assert.equal(returned.account.name, 'Asha Verma')
+  assert.equal((await authorize('facebook')).account.name, initialAccounts.get('facebook').name)
+
+  googleSubject = 'new-google-person'
+  googleName = 'Ananya Venkataraman'
+  const newGoogleAccount = await authorize('google')
+  assert.equal(newGoogleAccount.account.provider, 'google')
+  assert.equal(newGoogleAccount.account.name, 'Ananya Venkatara')
 
   for (const rejected of ['exp://different-host:8081/--/onboarding', expoGoReturnUrl + '?redirect=extra', 'https://other.example.test/onboarding']) {
     const result = await call('oauth/start', { method: 'POST', data: { provider: 'google', expoGoReturnUrl: rejected } })
