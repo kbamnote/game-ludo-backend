@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { MongoClient, MongoServerError } from 'mongodb'
+import type { MatchPot } from './matchEntry.js'
 
 export type Provider = 'google' | 'facebook'
 export type Account = { id: string; provider: Provider | 'guest'; name: string; coins: number; diamonds: number; avatar: number | null }
@@ -18,6 +19,11 @@ type OAuthStart = {
 }
 
 interface AccountStore {
+  accountById(id: string): Account | undefined | Promise<Account | undefined>
+  fundMatchPot(pot: MatchPot): void | Promise<void>
+  settleMatchPot(id: string, winners: string[], expiredBefore?: number): boolean | Promise<boolean>
+  renewMatchPots(ids: string[], expiresAt: number): void | Promise<void>
+  expiredMatchPots(now: number): Pick<MatchPot, 'id' | 'accounts'>[] | Promise<Pick<MatchPot, 'id' | 'accounts'>[]>
   createAccount(input: AccountRecord): Account | Promise<Account>
   replaceAccountName(id: string, previous: string, name: string): Account | undefined | Promise<Account | undefined>
   saveAvatar(id: string, avatar: number): Account | undefined | Promise<Account | undefined>
@@ -30,6 +36,19 @@ interface AccountStore {
 }
 
 export class AccountStorageUnavailable extends Error {}
+export class InsufficientMatchCoins extends Error {
+  constructor(readonly accountId: string) { super('A player does not have enough online coins.') }
+}
+
+function potCredits(pot: Pick<MatchPot, 'accounts' | 'entry'>, winners: string[]) {
+  if (!winners.length) return pot.accounts.map(id => ({ id, amount: pot.entry }))
+  const recipients = [...new Set(winners)]
+  if (recipients.some(id => !pot.accounts.includes(id))) throw Error('Winner was not in the match pot')
+  const total = pot.entry * pot.accounts.length
+  return recipients.map((id, index) => ({ id,
+    amount: Math.floor(total / recipients.length) + Number(index < total % recipients.length),
+  }))
+}
 
 function sqliteStore(file: string): AccountStore {
   const db = new DatabaseSync(file)
@@ -53,6 +72,13 @@ function sqliteStore(file: string): AccountStore {
         account_id TEXT NOT NULL REFERENCES accounts(id),
         expires INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS match_pots (
+        id TEXT PRIMARY KEY,
+        entry INTEGER NOT NULL,
+        accounts TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS match_pots_expiry ON match_pots(expires_at);
       CREATE TABLE IF NOT EXISTS oauth (
         state TEXT PRIMARY KEY,
         request_hash TEXT UNIQUE NOT NULL,
@@ -71,7 +97,49 @@ function sqliteStore(file: string): AccountStore {
   }
   const fields = 'id, provider, name, coins, diamonds, avatar'
   const getAccount = (id: string) => db.prepare('SELECT ' + fields + ' FROM accounts WHERE id = ?').get(id) as Account | undefined
+  function transaction<T>(operation: () => T): T {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = operation()
+      db.exec('COMMIT')
+      return result
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+  }
   return {
+    accountById: getAccount,
+    fundMatchPot(pot) {
+      transaction(() => {
+        db.prepare('INSERT INTO match_pots VALUES (?, ?, ?, ?)').run(pot.id, pot.entry, JSON.stringify(pot.accounts), pot.expiresAt)
+        const debit = db.prepare('UPDATE accounts SET coins = coins - ? WHERE id = ? AND coins >= ?')
+        for (const id of pot.accounts) {
+          if (debit.run(pot.entry, id, pot.entry).changes !== 1) throw new InsufficientMatchCoins(id)
+        }
+      })
+    },
+    settleMatchPot(id, winners, expiredBefore) {
+      return transaction(() => {
+        const row = db.prepare('SELECT entry, accounts, expires_at FROM match_pots WHERE id = ?').get(id) as
+          { entry: number; accounts: string; expires_at: number } | undefined
+        if (!row || (expiredBefore !== undefined && row.expires_at > expiredBefore)) return false
+        const credit = db.prepare('UPDATE accounts SET coins = coins + ? WHERE id = ?')
+        for (const { id, amount } of potCredits({ entry: row.entry, accounts: JSON.parse(row.accounts) as string[] }, winners)) {
+          if (credit.run(amount, id).changes !== 1) throw Error('Could not credit match coins')
+        }
+        db.prepare('DELETE FROM match_pots WHERE id = ?').run(id)
+        return true
+      })
+    },
+    renewMatchPots(ids, expiresAt) {
+      const renew = db.prepare('UPDATE match_pots SET expires_at = ? WHERE id = ?')
+      for (const id of ids) renew.run(expiresAt, id)
+    },
+    expiredMatchPots(now) {
+      return db.prepare('SELECT id, accounts FROM match_pots WHERE expires_at <= ?').all(now)
+        .map(row => ({ id: String(row.id), accounts: JSON.parse(String(row.accounts)) as string[] }))
+    },
     createAccount({ id, provider, subject, name, coins, diamonds }) {
       db.prepare(`INSERT INTO accounts (id, provider, subject, name, coins, diamonds)
         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(provider, subject) DO NOTHING`).run(id, provider, subject, name, coins, diamonds)
@@ -145,11 +213,13 @@ async function mongoStore(uri: string): Promise<AccountStore> {
   const accounts = database.collection<MongoAccount>('accounts')
   const sessions = database.collection<MongoSession>('sessions')
   const oauth = database.collection<MongoAttempt>('oauth')
+  const pots = database.collection<Omit<MatchPot, 'id'> & { _id: string }>('match_pots')
   try {
     await client.connect()
     await Promise.all([
       accounts.createIndex({ provider: 1, subject: 1 }, { unique: true }),
       sessions.createIndex({ expires: 1 }, { expireAfterSeconds: 0 }),
+      pots.createIndex({ expiresAt: 1 }),
       oauth.createIndexes([
         { key: { requestHash: 1 }, unique: true },
         { key: { expires: 1 }, expireAfterSeconds: 0 },
@@ -165,6 +235,36 @@ async function mongoStore(uri: string): Promise<AccountStore> {
     return row ? publicAccount(row) : undefined
   }
   return {
+    accountById: getAccount,
+    async fundMatchPot({ id, ...pot }) {
+      await client.withSession(session => session.withTransaction(async () => {
+        await pots.insertOne({ _id: id, ...pot }, { session })
+        for (const id of pot.accounts) {
+          const debit = await accounts.updateOne({ _id: id, coins: { $gte: pot.entry } }, { $inc: { coins: -pot.entry } }, { session })
+          if (!debit.matchedCount) throw new InsufficientMatchCoins(id)
+        }
+      }))
+    },
+    settleMatchPot(id, winners, expiredBefore) {
+      return client.withSession(session => session.withTransaction(async () => {
+        const pot = await pots.findOneAndDelete({ _id: id,
+          ...(expiredBefore === undefined ? {} : { expiresAt: { $lte: expiredBefore } }),
+        }, { session })
+        if (!pot) return false
+        for (const { id, amount } of potCredits(pot, winners)) {
+          const credit = await accounts.updateOne({ _id: id }, { $inc: { coins: amount } }, { session })
+          if (!credit.matchedCount) throw Error('Could not credit match coins')
+        }
+        return true
+      }))
+    },
+    async renewMatchPots(ids, expiresAt) {
+      if (ids.length) await pots.updateMany({ _id: { $in: ids } }, { $set: { expiresAt } })
+    },
+    async expiredMatchPots(now) {
+      const rows = await pots.find({ expiresAt: { $lte: now } }, { projection: { _id: 1, accounts: 1 } }).toArray()
+      return rows.map(row => ({ id: row._id, accounts: row.accounts }))
+    },
     async createAccount({ id, provider, subject, ...account }) {
       const identity = { provider, subject }
       try {

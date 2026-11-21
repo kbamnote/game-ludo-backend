@@ -34,6 +34,26 @@ test('Quick ends as soon as a single character makes it home', t => {
   assert.deepEqual(match.ranking, [0])
 })
 
+test('Friends pauses the next turn for the gold throne shot and keeps silver shorter', t => {
+  const room = roomWith(4)
+  t.mock.method(Math, 'random', () => 0)
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const match = startMatch(room)
+  for (const [seat, duration] of [[0, 12_500], [1, 8_600]]) {
+    const tokens = match.tokens.filter(token => token.seat === seat)
+    tokens.forEach(token => { token.progress = HOME_STEP })
+    tokens[0].progress--
+    match.current = seat
+    assert.equal(doRoll(room, seat).moves.length, 1)
+    assert.equal(doMove(room, seat, tokens[0].id).ended, false)
+    assert.equal(match.coronationUntil, now + 280 + duration)
+    now = match.coronationUntil - 1
+    assert.match(doRoll(room, match.current).error, /coronation/)
+    now++
+  }
+})
+
 test('Team Up allows shared tiles with a partner and needs both partners to finish', t => {
   const tokens = createTokens([0, 1, 2, 3])
   const mover = tokens.find(token => token.seat === 0)

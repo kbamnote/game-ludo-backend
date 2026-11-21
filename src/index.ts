@@ -1,5 +1,8 @@
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { serveAccounts, authenticatedAccount } from './accounts.js'
+import { accountStore, InsufficientMatchCoins } from './accountStore.js'
+import { readMatchEntry, type MatchEntry, type MatchPot } from './matchEntry.js'
 import { Server, type Socket } from 'socket.io'
 import { privacyHtml } from './privacy.js'
 import { fitPortrait } from './fitPortrait.js'
@@ -14,6 +17,7 @@ import {
   createRoom,
   doMove,
   doRoll,
+  getRoom,
   joinRoom,
   leaveRoom,
   markDisconnected,
@@ -70,6 +74,44 @@ attachVoice(io)
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 
+const POT_LEASE_MS = 5 * 60_000
+const startingRooms = new WeakSet<Room>()
+type FundedRoom = { pot: MatchPot; seats: Map<Seat, string>; winners?: string[]; settling?: boolean }
+const fundedRooms = new Map<Room, FundedRoom>()
+
+function walletChanged(players: string[]) {
+  for (const id of players) io.to(`wallet:${id}`).emit('wallet:changed')
+}
+
+async function settlePot(room: Room, winners: string[]) {
+  const funded = fundedRooms.get(room)
+  if (!funded || funded.settling) return
+  const recipients = funded.winners ??= winners
+  funded.settling = true
+  try {
+    const store = await accountStore()
+    await store.settleMatchPot(funded.pot.id, recipients)
+    fundedRooms.delete(room)
+    walletChanged(funded.pot.accounts)
+  } catch (error) {
+    console.warn('[match pot] Settlement will retry:', error instanceof Error ? error.name : 'Unknown error')
+  } finally {
+    funded.settling = false
+  }
+}
+
+async function checkEntry(playerId: string, entry: MatchEntry) {
+  if (!entry) return null
+  if (!playerId.startsWith('acct_')) return 'Sign in or play as a guest to enter a coin table.'
+  try {
+    const store = await accountStore()
+    const account = await store.accountById(playerId)
+    return account && account.coins >= entry ? null : 'You do not have enough online coins for this table.'
+  } catch {
+    return 'Could not check your online coins. Try again.'
+  }
+}
+
 function publish(room: Room) {
   io.to(room.code).emit('room:state', snapshot(room))
 }
@@ -123,7 +165,14 @@ function performMove(room: Room, seat: Seat, tokenId: string) {
     captures: result.captures,
     snapshot: snapshot(room),
   })
-  if (result.ended) io.to(room.code).emit('match:ended', { ranking: room.match?.ranking ?? [] })
+  const ranking = room.match?.ranking ?? []
+  const funded = fundedRooms.get(room)
+  if (funded && !funded.winners && (room.variant === 'classic' ? ranking.length > 0 : result.ended)) {
+    const winners = ranking.slice(0, room.variant === 'teams' ? 2 : 1)
+      .map(winner => funded.seats.get(winner)).filter((id): id is string => id !== undefined)
+    void settlePot(room, winners)
+  }
+  if (result.ended) io.to(room.code).emit('match:ended', { ranking })
   publish(room)
   return result
 }
@@ -147,7 +196,11 @@ io.on('connection', (socket) => {
       ack?.({ ok: false, error: 'playerId required' })
       return
     }
+    if (socket.data.playerId && socket.data.playerId !== playerId) {
+      return ack?.({ ok: false, error: 'Reconnect to change accounts' })
+    }
     socket.data.playerId = playerId
+    if (account) void socket.join(`wallet:${account.id}`)
     socket.data.name = (typeof payload?.name === 'string' ? payload.name : account?.name ?? 'Player').slice(0, 16)
     ack?.({ ok: true })
   }
@@ -161,24 +214,35 @@ io.on('connection', (socket) => {
     void identification.then(() => next(), () => next(new Error('Could not identify player')))
   })
 
-  socket.on('room:create', (payload: { character?: unknown }, ack?: (r: unknown) => void) => {
+  socket.on('room:create', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
 
-    const room = createRoom(me.playerId, me.name, false, readCharacter(payload?.character))
+    const entry = readMatchEntry(payload?.entry)
+    if (entry === undefined) return ack?.({ ok: false, error: 'Choose a listed coin entry.' })
+    const blocked = await checkEntry(me.playerId, entry)
+    if (blocked) return ack?.({ ok: false, error: blocked })
+    if (!socket.connected || roomOfSocket(socket.id)) return ack?.({ ok: false, error: 'Leave your current room first.' })
+    const room = createRoom(me.playerId, me.name, false, readCharacter(payload?.character), entry)
     bindSocket(room, me.playerId, socket.id)
     socket.join(room.code)
     ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
   })
 
-  socket.on('room:quick', (payload: { character?: unknown }, ack?: (r: unknown) => void) => {
+  socket.on('room:quick', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
+    const entry = readMatchEntry(payload?.entry)
+    if (entry === undefined) return ack?.({ ok: false, error: 'Choose a listed coin entry.' })
+    const blocked = await checkEntry(me.playerId, entry)
+    if (blocked) return ack?.({ ok: false, error: blocked })
+    if (!socket.connected) return
     const current = roomOfSocket(socket.id)
     if (current) return ack?.({ ok: true, snapshot: snapshot(current) })
-    const open = allRooms().find((room) => room.publicTable && room.phase === 'lobby' && room.members.length < 4)
-    const room = open ?? createRoom(me.playerId, me.name, true)
+    const open = allRooms().find(room => room.publicTable && room.entry === entry && room.phase === 'lobby' &&
+      room.members.length < 4 && !startingRooms.has(room))
+    const room = open ?? createRoom(me.playerId, me.name, true, undefined, entry)
     const joined = joinRoom(room.code, me.playerId, me.name, socket.id, readCharacter(payload?.character))
     if (!joined.ok) return ack?.({ ok: false, error: joined.error })
     socket.join(room.code)
@@ -186,13 +250,23 @@ io.on('connection', (socket) => {
     publish(room)
   })
 
-  socket.on('room:join', (payload: { code?: string; character?: unknown }, ack?: (r: unknown) => void) => {
+  socket.on('room:join', async (payload: { code?: string; character?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
 
     const code = (payload?.code ?? '').trim()
     if (!/^\d{6}$/.test(code)) return ack?.({ ok: false, error: 'Enter the 6-digit code' })
 
+    const room = getRoom(code)
+    if (!room) return ack?.({ ok: false, error: 'No room with that code' })
+    if (!room.members.some(member => member.playerId === me.playerId)) {
+      const blocked = await checkEntry(me.playerId, room.entry)
+      if (blocked) return ack?.({ ok: false, error: blocked })
+    }
+    if (!socket.connected) return
+    const current = roomOfSocket(socket.id)
+    if (current && current !== room) return ack?.({ ok: false, error: 'Leave your current room first.' })
+    if (room !== getRoom(code) || startingRooms.has(room)) return ack?.({ ok: false, error: 'The room is starting. Try again shortly.' })
     const result = joinRoom(code, me.playerId, me.name, socket.id, readCharacter(payload?.character))
     if (!result.ok) return ack?.({ ok: false, error: result.error })
 
@@ -205,7 +279,7 @@ io.on('connection', (socket) => {
   socket.on('room:ready', (payload: { ready?: boolean }) => {
     const me = identityOf(socket)
     const room = roomOfSocket(socket.id)
-    if (!me || !room) return
+    if (!me || !room || startingRooms.has(room)) return
     setReady(room, me.playerId, !!payload?.ready)
     publish(room)
   })
@@ -214,20 +288,48 @@ io.on('connection', (socket) => {
     const me = identityOf(socket)
     const room = roomOfSocket(socket.id)
     if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
+    if (startingRooms.has(room)) return ack?.({ ok: false, error: 'This match is starting.' })
     const error = setRoomVariant(room, me.playerId, payload?.variant)
     if (error) return ack?.({ ok: false, error })
     ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
   })
 
-  socket.on('room:start', (_p: unknown, ack?: (r: unknown) => void) => {
+  socket.on('room:start', async (_p: unknown, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     const room = roomOfSocket(socket.id)
     if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
     if (room.hostId !== me.playerId) return ack?.({ ok: false, error: 'Only the host can start' })
+    if (startingRooms.has(room)) return ack?.({ ok: false, error: 'This match is starting.' })
 
     const blocked = canStart(room)
     if (blocked) return ack?.({ ok: false, error: blocked })
+    if (fundedRooms.has(room)) return ack?.({ ok: false, error: 'The earlier entry refund is processing. Try again.' })
+    if (room.entry) {
+      const seats = new Map(room.members.flatMap(member => member.seat === null ? [] : [[member.seat, member.playerId] as const]))
+      const pot = { id: randomUUID(), entry: room.entry, accounts: [...seats.values()], expiresAt: Date.now() + POT_LEASE_MS }
+      startingRooms.add(room)
+      try {
+        const store = await accountStore()
+        await store.fundMatchPot(pot)
+        fundedRooms.set(room, { pot, seats })
+        const sameSeats = room.members.every(member => member.seat === null || seats.get(member.seat) === member.playerId) &&
+          room.members.filter(member => member.seat !== null).length === seats.size
+        if (!sameSeats || room.hostId !== me.playerId || canStart(room)) {
+          void settlePot(room, [])
+          return ack?.({ ok: false, error: 'The room changed before the match started. Try again.' })
+        }
+        walletChanged(pot.accounts)
+      } catch (error) {
+        if (error instanceof InsufficientMatchCoins) {
+          const player = room.members.find(member => member.playerId === error.accountId)
+          return ack?.({ ok: false, error: `${player?.name ?? 'A player'} needs more online coins for this table.` })
+        }
+        return ack?.({ ok: false, error: 'Could not reserve the entry coins. Try again.' })
+      } finally {
+        startingRooms.delete(room)
+      }
+    }
 
     startMatch(room)
     ack?.({ ok: true })
@@ -241,6 +343,7 @@ io.on('connection', (socket) => {
     if (!me || !room) return
     socket.leave(room.code)
     leaveRoom(room, me.playerId)
+    if (room.members.length === 0 && room.phase !== 'finished') void settlePot(room, [])
     publish(room)
   })
 
@@ -321,8 +424,27 @@ setInterval(() => {
       if (tokenId) performMove(room, m.current, tokenId)
     }
   }
-  sweepIdleRooms()
+  for (const room of sweepIdleRooms()) if (room.phase !== 'finished') void settlePot(room, [])
 }, 1000)
+
+let maintainingPots = false
+setInterval(async () => {
+  if (maintainingPots) return
+  maintainingPots = true
+  try {
+    const store = await accountStore()
+    const now = Date.now()
+    await store.renewMatchPots([...fundedRooms.values()].map(({ pot }) => pot.id), now + POT_LEASE_MS)
+    for (const [room, funded] of fundedRooms) if (funded.winners) await settlePot(room, funded.winners)
+    for (const pot of await store.expiredMatchPots(now)) {
+      if (await store.settleMatchPot(pot.id, [], now)) walletChanged(pot.accounts)
+    }
+  } catch (error) {
+    console.warn('[match pot] Maintenance will retry:', error instanceof Error ? error.name : 'Unknown error')
+  } finally {
+    maintainingPots = false
+  }
+}, 30_000).unref()
 
 function roomsNeedingAttention(now: number): Room[] {
   return allRooms().filter((room) => {

@@ -1,3 +1,4 @@
+import type { MatchEntry } from './matchEntry.js'
 import {
   applyMove,
   createTokens,
@@ -15,7 +16,8 @@ export const MAX_SEATS = 4
 /** A seat that stalls this long has its turn played for it. */
 export const TURN_MS = 20_000
 // Keep in sync with the mobile coronation presentation.
-const CORONATION_MS = 8600
+const FIRST_CORONATION_MS = 12_500
+const SECOND_CORONATION_MS = 8_600
 /** Rooms with nobody connected are swept after this long. */
 export const ROOM_TTL_MS = 30 * 60_000
 
@@ -78,6 +80,8 @@ export interface MatchState {
 
 export interface Room {
   publicTable: boolean
+  entry: MatchEntry
+  prize: number
   variant: GameVariant
   code: string
   hostId: string
@@ -91,6 +95,8 @@ export interface Room {
 /** What a client is allowed to see. Identical for every member. */
 export interface RoomSnapshot {
   publicTable: boolean
+  entry: MatchEntry
+  prize: number
   variant: GameVariant
   code: string
   hostId: string
@@ -116,12 +122,14 @@ function randomCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-export function createRoom(playerId: string, name: string, publicTable = false, character?: Character): Room {
+export function createRoom(playerId: string, name: string, publicTable = false, character?: Character, entry: MatchEntry = 0): Room {
   let code = randomCode()
   while (rooms.has(code)) code = randomCode()
 
   const room: Room = {
     publicTable,
+    entry,
+    prize: 0,
     variant: 'classic',
     code,
     hostId: playerId,
@@ -272,6 +280,7 @@ export function startMatch(room: Room): MatchState {
   }
 
   room.match = match
+  room.prize = room.entry * seats.length
   room.phase = 'playing'
   room.lastActivity = Date.now()
   return match
@@ -378,7 +387,8 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
   // Give the next decision its full turn clock after the rescue presentation.
   if (move.captures.length) m.deadline += path.length * 280 + move.captures.length * 6500
   if (room.variant !== 'teams' && finished !== null && m.ranking.length <= 2) {
-    const presentation = path.length * 280 + CORONATION_MS
+    const duration = m.ranking.length === 1 ? FIRST_CORONATION_MS : SECOND_CORONATION_MS
+    const presentation = path.length * 280 + duration
     m.coronationUntil = Date.now() + presentation
     m.deadline += presentation
   }
@@ -430,6 +440,8 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
     code: room.code,
     hostId: room.hostId,
     publicTable: room.publicTable,
+    entry: room.entry,
+    prize: room.match ? room.prize : room.entry * room.members.filter(member => member.seat !== null).length,
     variant: room.variant,
     phase: room.phase,
     members: room.members.map((m) => ({
@@ -461,8 +473,13 @@ export function allRooms(): Room[] {
 
 export function sweepIdleRooms() {
   const now = Date.now()
+  const removed: Room[] = []
   for (const [code, room] of rooms) {
     const anyone = room.members.some((m) => m.connected)
-    if (!anyone && now - room.lastActivity > ROOM_TTL_MS) rooms.delete(code)
+    if (!anyone && now - room.lastActivity > ROOM_TTL_MS) {
+      rooms.delete(code)
+      removed.push(room)
+    }
   }
+  return removed
 }

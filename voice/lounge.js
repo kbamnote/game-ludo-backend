@@ -16,6 +16,8 @@ if (matchTicket) {
 }
 let socket = null
 let context = null
+let speaker = null
+let speakerMuted = false
 let roomCode = ''
 let stream = null
 let input = null
@@ -48,6 +50,7 @@ function leave(message = '') {
     context.onstatechange = null
     void context.close().catch(() => {})
     context = null
+    speaker = null
   }
   playAt.clear()
   el('setup').hidden = Boolean(matchTicket)
@@ -70,7 +73,7 @@ function roster(members) {
 }
 
 function play(id, frame) {
-  if (!roomCode || context?.state !== 'running' || !(frame instanceof ArrayBuffer) || frame.byteLength !== 960) return
+  if (!roomCode || !speaker || speakerMuted || context?.state !== 'running' || !(frame instanceof ArrayBuffer) || frame.byteLength !== 960) return
   const now = context.currentTime
   const next = playAt.get(id) || 0
   // Drop backed-up packets instead of letting a slow connection delay the conversation.
@@ -82,7 +85,7 @@ function play(id, frame) {
   for (let i = 0; i < pcm.length; i++) output[i] = pcm[i] / 32768
   const source = context.createBufferSource()
   source.buffer = buffer
-  source.connect(context.destination)
+  source.connect(speaker)
   source.onended = () => source.disconnect()
   source.start(start)
   playAt.set(id, start + buffer.duration)
@@ -95,6 +98,9 @@ function enter(create) {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) return notice('Voice needs a secure HTTPS connection and microphone support.')
   try {
     context = new AudioContext()
+    speaker = context.createGain()
+    speaker.gain.value = speakerMuted ? 0 : 1
+    speaker.connect(context.destination)
     el('resume').hidden = true
     context.onstatechange = () => { el('resume').hidden = context?.state === 'running' }
     void context.resume().catch(() => { el('resume').hidden = false })
@@ -133,6 +139,18 @@ function enter(create) {
   })
   session.connect()
 }
+
+function setSpeakerMuted(muted) {
+  if (!matchTicket || typeof muted !== 'boolean' || muted === speakerMuted) return
+  speakerMuted = muted
+  if (speaker) speaker.gain.value = muted ? 0 : 1
+  if (muted) playAt.clear()
+}
+
+document.addEventListener('voice-speaker', (event) => setSpeakerMuted(event.detail))
+window.addEventListener('message', (event) => {
+  if (event.source === window.parent && event.data?.type === 'voice-speaker') setSpeakerMuted(event.data.muted)
+})
 
 async function toggleMic() {
   if (stream) { stopMic(); return notice('Microphone muted.') }
