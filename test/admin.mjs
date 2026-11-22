@@ -53,6 +53,12 @@ test('admin access, balances, match placements and activity use persisted record
   let overview = await response.json()
   assert.deepEqual([overview.players, overview.online, overview.live, overview.matches, overview.coins, overview.diamonds], [2, 1, 1, 1, 1800, 20])
   assert.equal(overview.recent[0].status, 'playing')
+  const connected = await (await admin('players?view=online&limit=1')).json()
+  assert.equal(connected.total, 1)
+  assert.equal(connected.rows[0].id, hostId)
+  assert.equal((await (await admin('players?view=online&q=' + guestId)).json()).total, 0)
+  assert.deepEqual((await (await admin('matches?view=live')).json()).rows.map(row => row.id), [id])
+  assert.equal((await (await admin('matches?view=completed')).json()).total, 0)
 
   match.ranking = [...match.seats]
   room.phase = 'finished'
@@ -60,6 +66,11 @@ test('admin access, balances, match placements and activity use persisted record
   assert.equal(await store.settleMatchPot(id, [hostId]), true)
   const player = await (await admin('players/' + hostId)).json()
   assert.deepEqual([player.id, player.online, player.coins, player.diamonds], [hostId, true, 1100, 10])
+  await store.createAccount({ id: 'third', provider: 'guest', subject: 'third', name: 'Third', coins: 500, diamonds: 25, avatar: null })
+  assert.equal((await (await admin('players?view=coins&limit=1')).json()).rows[0].id, hostId)
+  assert.equal((await (await admin('players?view=diamonds&limit=1')).json()).rows[0].id, 'third')
+  assert.equal((await (await admin('matches?view=live')).json()).total, 0)
+  assert.deepEqual((await (await admin('matches?view=completed')).json()).rows.map(row => row.id), [id])
   const { rows: listed } = await (await admin('players?q=' + hostId)).json()
   assert.equal(listed.length, 1)
   assert.equal(Object.hasOwn(listed[0], 'subject'), false)

@@ -46,6 +46,7 @@ export async function serveAdmin(req: IncomingMessage, res: ServerResponse, conn
     const path = pathname.replace(/^\/api\/admin\//, '')
     const page = pagination(searchParams)
     const search = searchParams.get('q')?.trim().slice(0, 80) ?? ''
+    const view = searchParams.get('view')
     const accountId = searchParams.get('accountId') ?? undefined
     const matchId = searchParams.get('matchId') ?? undefined
     const playerPath = /^players\/([a-z\d_-]{1,90})$/i.exec(path)?.[1]
@@ -63,7 +64,10 @@ export async function serveAdmin(req: IncomingMessage, res: ServerResponse, conn
     }
     const online = connected()
     const liveMatches = allRooms().filter(room => room.phase === 'playing')
-    const liveIds = new Set(liveMatches.map(room => trackedMatch(room)?.id))
+    const liveIds = new Set(liveMatches.flatMap(room => {
+      const tracked = trackedMatch(room)
+      return tracked ? [tracked.id] : []
+    }))
     const matchStatus = <T extends { status: string; id: string }>(match: T) => ({
       ...match, status: match.status === 'playing' && !liveIds.has(match.id) ? 'interrupted' : match.status,
     })
@@ -75,11 +79,17 @@ export async function serveAdmin(req: IncomingMessage, res: ServerResponse, conn
         activity: await withPlayerNames(activity.rows), recent: matches.rows.map(matchStatus) })
     }
     if (path === 'players') {
-      const result = await store.admin.players(page, search)
+      const result = await store.admin.players(page, search, {
+        ids: view === 'online' ? [...online] : undefined,
+        balance: view === 'coins' || view === 'diamonds' ? view : undefined,
+      })
       return json(res, 200, { ...result, rows: result.rows.map(player => ({ ...player, online: online.has(player.id) })) })
     }
     if (path === 'matches') {
-      const result = await store.admin.matches(page, accountId, search)
+      const result = await store.admin.matches(page, accountId, search, {
+        ids: view === 'live' ? [...liveIds] : undefined,
+        completed: view === 'completed',
+      })
       return json(res, 200, { ...result, rows: result.rows.map(matchStatus) })
     }
     if (path === 'activity') {

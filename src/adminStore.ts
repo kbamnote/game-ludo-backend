@@ -18,13 +18,15 @@ export type Activity = {
 }
 export type Page = { limit: number; offset: number }
 export type ActivityFilter = { accountId?: string; matchId?: string }
+type PlayerFilter = { ids?: string[]; balance?: 'coins' | 'diamonds' }
+type MatchFilter = { ids?: string[]; completed?: boolean }
 type Summary = { players: number; matches: number; completed: number; coins: number; diamonds: number }
 export type RankedAccount = AdminAccount & { wins: number; rank: number }
 
 export interface AdminStore {
   summary(): Summary | Promise<Summary>
-  players(page: Page, search: string): PageResult<AdminAccount> | Promise<PageResult<AdminAccount>>
-  matches(page: Page, accountId?: string, search?: string): PageResult<AdminMatch> | Promise<PageResult<AdminMatch>>
+  players(page: Page, search: string, filter?: PlayerFilter): PageResult<AdminAccount> | Promise<PageResult<AdminAccount>>
+  matches(page: Page, accountId?: string, search?: string, filter?: MatchFilter): PageResult<AdminMatch> | Promise<PageResult<AdminMatch>>
   match(id: string): AdminMatch | null | Promise<AdminMatch | null>
   activity(page: Page, filter: ActivityFilter): PageResult<Activity> | Promise<PageResult<Activity>>
   leaderboard(page: Page): PageResult<RankedAccount> | Promise<PageResult<RankedAccount>>
@@ -58,20 +60,23 @@ function sqliteAdmin(db: DatabaseSync): AdminStore {
         (SELECT COUNT(*) FROM admin_matches) matches,
         (SELECT COUNT(*) FROM admin_matches WHERE status='completed') completed FROM accounts`).get() as Summary
     },
-    players({ limit, offset }, search) {
-      const args = [search.toLowerCase(), search.toLowerCase()]
-      const where = 'WHERE instr(lower(name), ?) > 0 OR instr(lower(id), ?) > 0'
-      if (!search) return {
-        total: Number(db.prepare('SELECT COUNT(*) count FROM accounts').get()?.count),
-        rows: db.prepare('SELECT id, name, provider, coins, diamonds FROM accounts ORDER BY name COLLATE NOCASE, id LIMIT ? OFFSET ?').all(limit, offset) as AdminAccount[],
+    players({ limit, offset }, search, { ids, balance } = {}) {
+      const conditions: string[] = []
+      const args: string[] = []
+      if (search) {
+        conditions.push('(instr(lower(name), ?) > 0 OR instr(lower(id), ?) > 0)')
+        args.push(search.toLowerCase(), search.toLowerCase())
       }
+      if (ids) { conditions.push('id IN (SELECT value FROM json_each(?))'); args.push(JSON.stringify(ids)) }
+      const where = conditions.length ? ' WHERE ' + conditions.join(' AND ') : ''
+      const order = balance === 'coins' ? 'coins DESC, ' : balance === 'diamonds' ? 'diamonds DESC, ' : ''
       return {
-        total: Number(db.prepare('SELECT COUNT(*) count FROM accounts ' + where).get(...args)?.count),
-        rows: db.prepare('SELECT id, name, provider, coins, diamonds FROM accounts ' + where + ' ORDER BY name COLLATE NOCASE, id LIMIT ? OFFSET ?')
+        total: Number(db.prepare('SELECT COUNT(*) count FROM accounts' + where).get(...args)?.count),
+        rows: db.prepare('SELECT id, name, provider, coins, diamonds FROM accounts' + where + ' ORDER BY ' + order + 'name COLLATE NOCASE, id LIMIT ? OFFSET ?')
           .all(...args, limit, offset) as AdminAccount[],
       }
     },
-    matches({ limit, offset }, accountId, search) {
+    matches({ limit, offset }, accountId, search, { ids, completed } = {}) {
       const conditions = []
       const args: string[] = []
       if (accountId) {
@@ -79,6 +84,8 @@ function sqliteAdmin(db: DatabaseSync): AdminStore {
         args.push(accountId)
       }
       if (search) { conditions.push('(instr(room, ?) > 0 OR instr(id, ?) > 0)'); args.push(search, search) }
+      if (ids) { conditions.push('id IN (SELECT value FROM json_each(?))'); args.push(JSON.stringify(ids)) }
+      if (completed) conditions.push("status = 'completed'")
       const where = conditions.length ? ' WHERE ' + conditions.join(' AND ') : ''
       return {
         total: Number(db.prepare('SELECT COUNT(*) count FROM admin_matches' + where).get(...args)?.count),
@@ -159,19 +166,25 @@ async function mongoAdmin(db: Db): Promise<AdminStore> {
       ])
       return { players: wallet?.players ?? 0, coins: wallet?.coins ?? 0, diamonds: wallet?.diamonds ?? 0, matches: total, completed }
     },
-    async players({ limit, offset }, search) {
-      const query = search ? { $or: [{ name: searchRegex(search) }, { _id: searchRegex(search) }] } : {}
+    async players({ limit, offset }, search, { ids, balance } = {}) {
+      const query: Filter<DocumentId<AdminAccount>> = {
+        ...(search && { $or: [{ name: searchRegex(search) }, { _id: searchRegex(search) }] }),
+        ...(ids && { _id: { $in: ids } }),
+      }
+      const sort = { ...(balance && { [balance]: -1 }), name: 1, _id: 1 } as const
       const [rows, total] = await Promise.all([
         accounts.find(query, { projection: accountFields }).collation({ locale: 'en', strength: 2 })
-          .sort({ name: 1, _id: 1 }).skip(offset).limit(limit).toArray(),
+          .sort(sort).skip(offset).limit(limit).toArray(),
         accounts.countDocuments(query),
       ])
       return { rows: rows.map(withId), total }
     },
-    async matches({ limit, offset }, accountId, search) {
+    async matches({ limit, offset }, accountId, search, { ids, completed } = {}) {
       const query: Filter<DocumentId<AdminMatch>> = {
         ...(accountId && { 'players.id': accountId }),
         ...(search && { $or: [{ room: searchRegex(search) }, { _id: searchRegex(search) }] }),
+        ...(ids && { _id: { $in: ids } }),
+        ...(completed && { status: 'completed' as const }),
       }
       const [rows, total] = await Promise.all([
         matches.find(query).sort({ startedAt: -1, _id: 1 }).skip(offset).limit(limit).toArray(), matches.countDocuments(query),
