@@ -5,7 +5,7 @@
  */
 
 const APP_NAME = 'CGP - Cockroach Game Party'
-const UPDATED = '21 November 2026'
+const UPDATED = '22 November 2026'
 
 /** Overridable with CONTACT_EMAIL in the Railway service variables. */
 const CONTACT = process.env.CONTACT_EMAIL ?? 'kunalbamnote7@gmail.com'
@@ -67,6 +67,7 @@ export function privacyHtml(): string {
 
     <h2>What the app collects</h2>
     <ul>
+      <li><strong>Match history and activity.</strong> We keep account, match and wallet events to show game history and operate CGP. Computer, Pass &amp; Play and Tournament results can sync when you reconnect. A local report includes the game mode, time, seats and placements. Other local players are listed by seat.</li>
       <li>
         <strong>Account information.</strong> We assign a game account ID and store a hashed
         sign-in identifier, the starter balance and your selected starter avatar. For guest

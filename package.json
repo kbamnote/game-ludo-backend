@@ -12,7 +12,7 @@
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json --watch & node --watch dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/accounts.mjs test/metaperson.mjs test/friends-rules.mjs test/match-pots.mjs && node test/two-client-match.mjs"
+    "test": "node --test test/accounts.mjs test/admin.mjs test/metaperson.mjs test/friends-rules.mjs test/match-pots.mjs && node test/two-client-match.mjs"
   },
   "dependencies": {
     "face-api.js": "0.22.2",

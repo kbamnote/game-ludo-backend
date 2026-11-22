@@ -1,4 +1,6 @@
 import { createServer } from 'node:http'
+import { serveAdmin } from './admin.js'
+import { trackActivity, trackMatchActivity, trackMatchEnd, trackMatchStart } from './adminTracking.js'
 import { randomUUID } from 'node:crypto'
 import { serveAccounts, authenticatedAccount } from './accounts.js'
 import { accountStore, InsufficientMatchCoins } from './accountStore.js'
@@ -42,6 +44,11 @@ const FORCED_MOVE_DELAY_MS = 1030
 
 const http = createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0]
+  if (path.startsWith('/api/admin/')) {
+    void serveAdmin(req, res, () => new Set([...io.sockets.sockets.values()].flatMap(socket =>
+      socket.data.accountId ? [String(socket.data.accountId)] : [])))
+    return
+  }
   if (path.startsWith('/auth/')) { void serveAccounts(req, res); return }
   if (path.startsWith('/avatars/metaperson/')) { void serveMetaPerson(req,res); return }
   if (path === '/avatars/fit') { void fitPortrait(req, res); return }
@@ -136,6 +143,7 @@ function seatOf(room: Room, playerId: string): Seat | null {
 function performRoll(room: Room, seat: Seat) {
   const result = doRoll(room, seat)
   if ('error' in result) return result
+  trackMatchActivity(room, seat, 'match.roll', String(result.die))
   io.to(room.code).emit('match:rolled', {
     seat,
     die: result.die,
@@ -158,6 +166,8 @@ function performRoll(room: Room, seat: Seat) {
 function performMove(room: Room, seat: Seat, tokenId: string) {
   const result = doMove(room, seat, tokenId)
   if ('error' in result) return result
+  trackMatchActivity(room, seat, 'match.move', result.path.length + ' steps' +
+    (result.captures.length ? ' · ' + result.captures.length + ' captured' : ''))
   io.to(room.code).emit('match:moved', {
     seat,
     tokenId: result.tokenId,
@@ -172,7 +182,10 @@ function performMove(room: Room, seat: Seat, tokenId: string) {
       .map(winner => funded.seats.get(winner)).filter((id): id is string => id !== undefined)
     void settlePot(room, winners)
   }
-  if (result.ended) io.to(room.code).emit('match:ended', { ranking })
+  if (result.ended) {
+    trackMatchEnd(room, 'completed')
+    io.to(room.code).emit('match:ended', { ranking })
+  }
   publish(room)
   return result
 }
@@ -200,7 +213,10 @@ io.on('connection', (socket) => {
       return ack?.({ ok: false, error: 'Reconnect to change accounts' })
     }
     socket.data.playerId = playerId
-    if (account) void socket.join(`wallet:${account.id}`)
+    if (account) {
+      socket.data.accountId = account.id
+      void socket.join(`wallet:${account.id}`)
+    }
     socket.data.name = (typeof payload?.name === 'string' ? payload.name : account?.name ?? 'Player').slice(0, 16)
     ack?.({ ok: true })
   }
@@ -228,6 +244,7 @@ io.on('connection', (socket) => {
     socket.join(room.code)
     ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
+    trackActivity({ kind: 'room.created', accountId: me.playerId, name: me.name, detail: 'Friends · ' + room.code })
   })
 
   socket.on('room:quick', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
@@ -248,6 +265,7 @@ io.on('connection', (socket) => {
     socket.join(room.code)
     ack?.({ ok: true, snapshot: snapshot(room) })
     publish(room)
+    trackActivity({ kind: 'room.joined', accountId: me.playerId, name: me.name, detail: 'Online · ' + room.code })
   })
 
   socket.on('room:join', async (payload: { code?: string; character?: unknown }, ack?: (r: unknown) => void) => {
@@ -274,6 +292,7 @@ io.on('connection', (socket) => {
     ack?.({ ok: true, snapshot: snapshot(result.room) })
     if (result.room.phase === 'playing') socket.emit('match:started', snapshot(result.room, true))
     publish(result.room)
+    trackActivity({ kind: 'room.joined', accountId: me.playerId, name: me.name, detail: 'Room ' + code })
   })
 
   socket.on('room:ready', (payload: { ready?: boolean }) => {
@@ -332,6 +351,7 @@ io.on('connection', (socket) => {
     }
 
     startMatch(room)
+    trackMatchStart(room, fundedRooms.get(room)?.pot.id)
     ack?.({ ok: true })
     io.to(room.code).emit('match:started', snapshot(room, true))
     publish(room)
@@ -342,8 +362,13 @@ io.on('connection', (socket) => {
     const room = roomOfSocket(socket.id)
     if (!me || !room) return
     socket.leave(room.code)
+    const seat = seatOf(room, me.playerId)
+    if (seat !== null) trackMatchActivity(room, seat, 'match.left')
     leaveRoom(room, me.playerId)
-    if (room.members.length === 0 && room.phase !== 'finished') void settlePot(room, [])
+    if (room.members.length === 0 && room.phase !== 'finished') {
+      trackMatchEnd(room, 'abandoned')
+      void settlePot(room, [])
+    }
     publish(room)
   })
 
@@ -370,6 +395,7 @@ io.on('connection', (socket) => {
     if (now < (reactionAvailableAt.get(room) ?? 0)) return reply({ ok: false, error: 'Wait for the current reaction to finish.' })
     // Reserve the room for the launch delay plus the visual effect.
     reactionAvailableAt.set(room, now + (payload.kind === 'bomb' ? 6900 : 4850))
+    trackMatchActivity(room, sender.seat, 'match.reaction', payload.kind)
     io.to(room.code).emit('match:reaction', { roomCode: room.code, kind: payload.kind, from: sender.seat, to: payload.to })
     reply({ ok: true })
   })
@@ -386,6 +412,7 @@ io.on('connection', (socket) => {
     const now = Date.now()
     if (now < (soundAvailableAt.get(room) ?? 0)) return reply({ ok: false, error: 'Give the sound a moment before playing another.' })
     soundAvailableAt.set(room, now + (clip === 11 ? 6100 : 900))
+    if (sender.seat !== null) trackMatchActivity(room, sender.seat, 'match.sound', 'Clip ' + clip)
     io.to(room.code).emit('match:sound', { roomCode: room.code, clip })
     reply({ ok: true })
   })
@@ -424,7 +451,10 @@ setInterval(() => {
       if (tokenId) performMove(room, m.current, tokenId)
     }
   }
-  for (const room of sweepIdleRooms()) if (room.phase !== 'finished') void settlePot(room, [])
+  for (const room of sweepIdleRooms()) if (room.phase !== 'finished') {
+    trackMatchEnd(room, 'abandoned')
+    void settlePot(room, [])
+  }
 }, 1000)
 
 let maintainingPots = false

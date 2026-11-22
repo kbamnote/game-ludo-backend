@@ -1,6 +1,8 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { accountStore, AccountStorageUnavailable, type Account, type Provider } from './accountStore.js'
+import { trackActivity } from './adminTracking.js'
+import { readLocalMatchReport } from './localMatchReport.js'
 
 const WELCOME_COINS = 1000
 const WELCOME_DIAMONDS = 10
@@ -21,11 +23,14 @@ class HttpError extends Error {
 
 async function accountFor(provider: Provider | 'guest', subject: string, displayName?: string) {
   const store = await accountStore()
+  const id = 'acct_' + randomUUID()
   const account = await store.createAccount({
-    id: 'acct_' + randomUUID(), provider, subject,
+    id, provider, subject,
     name: displayName || 'Player ' + randomBytes(2).toString('hex'),
     coins: WELCOME_COINS, diamonds: WELCOME_DIAMONDS, avatar: null,
   })
+  if (account.id === id) trackActivity({ kind: 'account.created', accountId: id, name: account.name,
+    coins: WELCOME_COINS, diamonds: WELCOME_DIAMONDS, detail: provider })
   if (displayName && account.name !== displayName && generatedNamePattern.test(account.name)) {
     return await store.replaceAccountName(account.id, account.name, displayName) ?? account
   }
@@ -36,6 +41,7 @@ async function sessionFor(account: Account, secret: string) {
   const token = digest('cgp-session:' + secret)
   const store = await accountStore()
   await store.saveSession(digest(token), account.id, Date.now() + SESSION_MS)
+  trackActivity({ kind: 'account.signed_in', accountId: account.id, name: account.name, detail: account.provider })
   return { token, account }
 }
 
@@ -224,17 +230,30 @@ export async function serveAccounts(req: IncomingMessage, res: ServerResponse) {
       if (!account) throw new HttpError(410, 'Sign-in ended. Please try again.')
       return json(res, 200, await sessionFor(account, requestKey))
     }
-    if (pathname === '/auth/me' || pathname === '/auth/avatar') {
+    if (pathname === '/auth/me' || pathname === '/auth/avatar' || pathname === '/auth/local-match') {
       const account = await authenticatedAccount(req.headers.authorization?.match(/^Bearer (.+)$/i)?.[1])
       if (!account) throw new HttpError(401, 'Your session expired. Please sign in again.')
       if (req.method === 'GET' && pathname === '/auth/me') return json(res, 200, account)
+      if (req.method === 'POST' && pathname === '/auth/local-match') {
+        const match = readLocalMatchReport(await body(req), account)
+        if (!match) throw new HttpError(400, 'Invalid local match report')
+        const { admin } = await accountStore()
+        if (!await admin.match(match.id)) await admin.saveMatch(match)
+        await admin.saveActivity([{ id: match.id + ':reported', at: match.endedAt ?? Date.now(), kind: 'local.reported',
+          accountId: account.id, name: account.name, matchId: match.id, detail: match.mode + ' · ' + match.status }])
+        return json(res, 200, { ok: true })
+      }
       if (req.method === 'PUT' && pathname === '/auth/avatar') {
         const { avatar } = await body(req)
         if (typeof avatar !== 'number' || !Number.isInteger(avatar) || avatar < 0 || avatar > 4) {
           throw new HttpError(400, 'Choose one of the available avatars')
         }
         const store = await accountStore()
-        return json(res, 200, await store.saveAvatar(account.id, avatar))
+        const updated = await store.saveAvatar(account.id, avatar)
+        if (updated && account.avatar !== avatar) trackActivity({
+          kind: 'account.avatar', accountId: account.id, name: account.name, detail: 'Avatar ' + avatar,
+        })
+        return json(res, 200, updated)
       }
     }
     return json(res, 404, { error: 'Not found' })
