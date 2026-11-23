@@ -23,12 +23,14 @@ let stream = null
 let input = null
 let capture = null
 let micRequest = 0
+let micStartupTimer
 const playAt = new Map()
 
 function notice(message) { el('status').textContent = message }
 
 function stopMic() {
   micRequest++
+  clearTimeout(micStartupTimer)
   if (capture) {
     capture.port.onmessage = null
     capture.port.close()
@@ -101,9 +103,12 @@ function enter(create) {
     speaker = context.createGain()
     speaker.gain.value = speakerMuted ? 0 : 1
     speaker.connect(context.destination)
-    el('resume').hidden = true
-    context.onstatechange = () => { el('resume').hidden = context?.state === 'running' }
-    void context.resume().catch(() => { el('resume').hidden = false })
+    const updatePlayback = () => {
+      el('resume').hidden = context?.state === 'running'
+    }
+    context.onstatechange = updatePlayback
+    updatePlayback()
+    void context.resume().then(updatePlayback, updatePlayback)
     socket = io('/voice', { transports: ['websocket'], reconnection: false, timeout: 10000, autoConnect: false })
   } catch { return leave('Audio could not start on this device.') }
   const session = socket
@@ -129,11 +134,12 @@ function enter(create) {
       el('lounge').hidden = false
       roster(reply.members)
       el('mic').hidden = autoJoinMatch && !autoStartMic
-      if (startMatchMic && !document.hidden) {
+      if (startMatchMic && !document.hidden && context.state === 'running') {
         notice('Starting microphone…')
         void toggleMic()
       } else {
-        notice(autoJoinMatch ? 'Listening to match voice.' : 'Microphone muted. Unmute when you want to speak.')
+        notice(context.state !== 'running' ? 'Tap Resume sound to start voice audio.'
+          : autoJoinMatch ? 'Listening to match voice.' : 'Microphone muted. Unmute when you want to speak.')
       }
     })
   })
@@ -158,7 +164,11 @@ async function toggleMic() {
   const request = ++micRequest
   const audio = context
   el('mic').disabled = true
+  notice('Starting microphone…')
   try {
+    // Start resuming from the same tap that requests the microphone.
+    const ready = audio.resume()
+    void ready.catch(() => { el('resume').hidden = false })
     // Start the permission request from the button gesture, before loading the processor.
     const media = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
@@ -170,16 +180,29 @@ async function toggleMic() {
     if (request !== micRequest) return
     input = audio.createMediaStreamSource(media)
     capture = new AudioWorkletNode(audio, 'voice-capture')
+    let receiving = false
+    micStartupTimer = setTimeout(() => {
+      if (request !== micRequest || receiving) return
+      stopMic()
+      notice(audio.state === 'running' ? 'The microphone sent no audio. Tap Unmute microphone to retry.'
+        : 'Tap Resume sound to start voice audio.')
+    }, 3500)
     capture.port.onmessage = ({ data }) => {
-      if (stream && socket?.connected) socket.volatile.emit('audio', data)
+      if (request !== micRequest || !stream || !socket?.connected) return
+      if (!(data instanceof ArrayBuffer) || data.byteLength !== 960) return
+      if (!receiving) {
+        receiving = true
+        clearTimeout(micStartupTimer)
+        socket.emit('mute', false)
+        el('mic').textContent = 'Mute microphone'
+        notice('Your microphone is live.')
+      }
+      socket.volatile.emit('audio', data)
     }
     input.connect(capture)
     // The worklet writes no output samples. Connecting keeps its render clock active.
     capture.connect(audio.destination)
     media.getAudioTracks()[0].onended = () => { stopMic(); notice('Microphone disconnected.') }
-    socket.emit('mute', false)
-    el('mic').textContent = 'Mute microphone'
-    notice('Your microphone is live.')
   } catch (error) {
     if (request !== micRequest) return
     stopMic()
@@ -194,7 +217,17 @@ el('create').onclick = () => enter(true)
 el('joinMatch').onclick = () => enter(false)
 el('mic').onclick = toggleMic
 el('leave').onclick = () => leave('You left the lounge.')
-el('resume').onclick = () => context?.resume().catch(() => notice('Sound is paused by your device.'))
+el('resume').onclick = () => {
+  const audio = context
+  if (!audio) return
+  if (startMatchMic && roomCode && !stream && !el('mic').disabled) {
+    void toggleMic()
+    return
+  }
+  void audio.resume().then(() => {
+    if (context === audio && roomCode) notice(stream ? 'Your microphone is live.' : 'Listening to match voice.')
+  }, () => notice('Sound is paused by your device.'))
+}
 el('invite').onclick = async () => {
   if (window.ReactNativeWebView) { window.ReactNativeWebView.postMessage(JSON.stringify({ shareCode: roomCode })); return }
   try {
