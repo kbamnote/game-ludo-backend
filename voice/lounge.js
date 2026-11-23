@@ -26,7 +26,31 @@ let micRequest = 0
 let micStartupTimer
 const playAt = new Map()
 
-function notice(message) { el('status').textContent = message }
+// The app and the web preview both embed this page; report status to whichever
+// is hosting it so the failure is readable outside the lounge's own panel.
+const hostOrigin = (() => {
+  try {
+    if (window.parent !== window && document.referrer) return new URL(document.referrer).origin
+  } catch { /* An opaque referrer leaves the preview without a host origin. */ }
+  return ''
+})()
+
+function notice(message) {
+  el('status').textContent = message
+  if (!message) return
+  const payload = {
+    voiceStatus: message,
+    joined: Boolean(roomCode),
+    live: Boolean(stream),
+    audio: context ? context.state : 'none',
+  }
+  try { window.ReactNativeWebView?.postMessage(JSON.stringify(payload)) }
+  catch { /* Not embedded in the app. */ }
+  if (hostOrigin) {
+    try { window.parent.postMessage({ type: 'voice-status', ...payload }, hostOrigin) }
+    catch { /* The host page went away. */ }
+  }
+}
 
 function stopMic() {
   micRequest++
