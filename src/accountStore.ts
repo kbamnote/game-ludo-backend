@@ -22,7 +22,7 @@ type OAuthStart = {
 interface AccountStore {
   admin: AdminStore
   accountById(id: string): Account | undefined | Promise<Account | undefined>
-  fundMatchPot(pot: MatchPot): void | Promise<void>
+  fundMatchPot(pot: MatchPot): { id: string; coins: number }[] | Promise<{ id: string; coins: number }[]>
   settleMatchPot(id: string, winners: string[], expiredBefore?: number): boolean | Promise<boolean>
   renewMatchPots(ids: string[], expiresAt: number): void | Promise<void>
   expiredMatchPots(now: number): Pick<MatchPot, 'id' | 'accounts'>[] | Promise<Pick<MatchPot, 'id' | 'accounts'>[]>
@@ -119,13 +119,16 @@ function sqliteStore(file: string): AccountStore {
     admin,
     accountById: getAccount,
     fundMatchPot(pot) {
-      transaction(() => {
+      return transaction(() => {
         db.prepare('INSERT INTO match_pots VALUES (?, ?, ?, ?)').run(pot.id, pot.entry, JSON.stringify(pot.accounts), pot.expiresAt)
-        const debit = db.prepare('UPDATE accounts SET coins = coins - ? WHERE id = ? AND coins >= ?')
-        for (const id of pot.accounts) {
-          if (debit.run(pot.entry, id, pot.entry).changes !== 1) throw new InsufficientMatchCoins(id)
-        }
+        const debit = db.prepare('UPDATE accounts SET coins = coins - ? WHERE id = ? AND coins >= ? RETURNING coins')
+        const balances = pot.accounts.map(id => {
+          const row = debit.get(pot.entry, id, pot.entry)
+          if (!row) throw new InsufficientMatchCoins(id)
+          return { id, coins: Number(row.coins) }
+        })
         admin.saveActivity(pot.accounts.map(id => walletEvent(pot.id, id, 'coins.entry', -pot.entry)))
+        return balances
       })
     },
     settleMatchPot(id, winners, expiredBefore) {
@@ -251,13 +254,17 @@ async function mongoStore(uri: string): Promise<AccountStore> {
     admin,
     accountById: getAccount,
     async fundMatchPot({ id, ...pot }) {
-      await client.withSession(session => session.withTransaction(async () => {
+      return client.withSession(session => session.withTransaction(async () => {
         await pots.insertOne({ _id: id, ...pot }, { session })
+        const balances: { id: string; coins: number }[] = []
         for (const id of pot.accounts) {
-          const debit = await accounts.updateOne({ _id: id, coins: { $gte: pot.entry } }, { $inc: { coins: -pot.entry } }, { session })
-          if (!debit.matchedCount) throw new InsufficientMatchCoins(id)
+          const account = await accounts.findOneAndUpdate({ _id: id, coins: { $gte: pot.entry } }, { $inc: { coins: -pot.entry } },
+            { session, returnDocument: 'after', projection: { coins: 1 } })
+          if (!account) throw new InsufficientMatchCoins(id)
+          balances.push({ id, coins: account.coins })
         }
         await admin.saveActivity(pot.accounts.map(accountId => walletEvent(id, accountId, 'coins.entry', -pot.entry)), session)
+        return balances
       }))
     },
     settleMatchPot(id, winners, expiredBefore) {

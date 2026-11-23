@@ -21,7 +21,7 @@ test('coin pots debit atomically, settle once, split team prizes and refund expi
   const balances = () => Promise.all(['a', 'b', 'c', 'd'].map(balance))
   const fund = (id, entry, accounts, expiresAt = 200) => store.fundMatchPot({ id, entry, accounts, expiresAt })
 
-  await fund('duel', 300, ['a', 'b'])
+  assert.deepEqual(await fund('duel', 300, ['a', 'b']), [{ id: 'a', coins: 700 }, { id: 'b', coins: 700 }])
   assert.deepEqual(await balances(), [700, 700, 1000, 1000])
   await assert.rejects(async () => fund('overlap', 1000, ['d', 'a']), InsufficientMatchCoins)
   assert.deepEqual(await balances(), [700, 700, 1000, 1000])

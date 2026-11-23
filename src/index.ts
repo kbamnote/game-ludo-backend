@@ -13,16 +13,19 @@ import { attachVoice, serveVoice } from './voice.js'
 import type { Seat } from './rules.js'
 import {
   allRooms,
+  activeRoomFor,
   autoPick,
   bindSocket,
   canStart,
   createRoom,
   doMove,
   doRoll,
+  eliminateSeat,
   getRoom,
   joinRoom,
   leaveRoom,
   markDisconnected,
+  missRoll,
   readCharacter,
   roomOfSocket,
   setReady,
@@ -31,6 +34,7 @@ import {
   startMatch,
   sweepIdleRooms,
   TURN_MS,
+  MATCH_INTRO_MS,
   type Room,
 } from './room.js'
 
@@ -41,6 +45,9 @@ const soundAvailableAt = new WeakMap<Room, number>()
 const MATCH_SOUND_COUNT = 18
 // Let the Friends dice finish rolling before the only legal move is played.
 const FORCED_MOVE_DELAY_MS = 1030
+const ROLL_LEAD_MS = 220
+const SOUND_LEAD_MS = 500
+const REACTION_LEAD_MS = 2000
 
 const http = createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0]
@@ -139,12 +146,25 @@ function seatOf(room: Room, playerId: string): Seat | null {
   return room.members.find((m) => m.playerId === playerId)?.seat ?? null
 }
 
+function hasOtherLiveMatch(socket: Socket, target?: Room) {
+  const accountId = socket.data.accountId
+  if (typeof accountId !== 'string') return false
+  const active = activeRoomFor(accountId)
+  return Boolean(active && active !== target)
+}
+
+const liveMatchMessage = 'Resume or forfeit your live match before joining another table.'
+
 /** Runs a roll and tells the room, then lets bots/timeouts continue. */
-function performRoll(room: Room, seat: Seat) {
-  const result = doRoll(room, seat)
+function performRoll(room: Room, seat: Seat, manual = true) {
+  const result = doRoll(room, seat, manual)
   if ('error' in result) return result
   trackMatchActivity(room, seat, 'match.roll', String(result.die))
+  const serverNow = Date.now()
   io.to(room.code).emit('match:rolled', {
+    roomCode: room.code,
+    serverNow,
+    startsAt: serverNow + ROLL_LEAD_MS,
     seat,
     die: result.die,
     movableTokenIds: result.moves.map((m) => m.tokenId),
@@ -175,19 +195,24 @@ function performMove(room: Room, seat: Seat, tokenId: string) {
     captures: result.captures,
     snapshot: snapshot(room),
   })
+  settleResults(room)
+  publish(room)
+  return result
+}
+
+function settleResults(room: Room) {
   const ranking = room.match?.ranking ?? []
+  const ended = room.phase === 'finished'
   const funded = fundedRooms.get(room)
-  if (funded && !funded.winners && (room.variant === 'classic' ? ranking.length > 0 : result.ended)) {
+  if (funded && !funded.winners && (room.variant === 'classic' ? ranking.length > 0 : ended)) {
     const winners = ranking.slice(0, room.variant === 'teams' ? 2 : 1)
       .map(winner => funded.seats.get(winner)).filter((id): id is string => id !== undefined)
     void settlePot(room, winners)
   }
-  if (result.ended) {
+  if (ended) {
     trackMatchEnd(room, 'completed')
     io.to(room.code).emit('match:ended', { ranking })
   }
-  publish(room)
-  return result
 }
 
 /* ───────────────────────────── socket wiring ───────────────────────────── */
@@ -230,9 +255,14 @@ io.on('connection', (socket) => {
     void identification.then(() => next(), () => next(new Error('Could not identify player')))
   })
 
+  socket.on('match:clock', (_payload: unknown, ack?: (reply: unknown) => void) => {
+    if (typeof ack === 'function') ack({ ok: true, serverNow: Date.now() })
+  })
+
   socket.on('room:create', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
+    if (hasOtherLiveMatch(socket)) return ack?.({ ok: false, error: liveMatchMessage })
 
     const entry = readMatchEntry(payload?.entry)
     if (entry === undefined) return ack?.({ ok: false, error: 'Choose a listed coin entry.' })
@@ -250,6 +280,7 @@ io.on('connection', (socket) => {
   socket.on('room:quick', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
+    if (hasOtherLiveMatch(socket)) return ack?.({ ok: false, error: liveMatchMessage })
     const entry = readMatchEntry(payload?.entry)
     if (entry === undefined) return ack?.({ ok: false, error: 'Choose a listed coin entry.' })
     const blocked = await checkEntry(me.playerId, entry)
@@ -272,11 +303,12 @@ io.on('connection', (socket) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
 
-    const code = (payload?.code ?? '').trim()
+    const code = typeof payload?.code === 'string' ? payload.code.trim() : ''
     if (!/^\d{6}$/.test(code)) return ack?.({ ok: false, error: 'Enter the 6-digit code' })
 
     const room = getRoom(code)
     if (!room) return ack?.({ ok: false, error: 'No room with that code' })
+    if (hasOtherLiveMatch(socket, room)) return ack?.({ ok: false, error: liveMatchMessage })
     if (!room.members.some(member => member.playerId === me.playerId)) {
       const blocked = await checkEntry(me.playerId, room.entry)
       if (blocked) return ack?.({ ok: false, error: blocked })
@@ -285,14 +317,24 @@ io.on('connection', (socket) => {
     const current = roomOfSocket(socket.id)
     if (current && current !== room) return ack?.({ ok: false, error: 'Leave your current room first.' })
     if (room !== getRoom(code) || startingRooms.has(room)) return ack?.({ ok: false, error: 'The room is starting. Try again shortly.' })
+    const oldSocketId = room.members.find(member => member.playerId === me.playerId)?.socketId
     const result = joinRoom(code, me.playerId, me.name, socket.id, readCharacter(payload?.character))
     if (!result.ok) return ack?.({ ok: false, error: result.error })
 
+    if (oldSocketId && oldSocketId !== socket.id) void io.sockets.sockets.get(oldSocketId)?.leave(code)
     socket.join(code)
     ack?.({ ok: true, snapshot: snapshot(result.room) })
     if (result.room.phase === 'playing') socket.emit('match:started', snapshot(result.room, true))
     publish(result.room)
     trackActivity({ kind: 'room.joined', accountId: me.playerId, name: me.name, detail: 'Room ' + code })
+  })
+
+  socket.on('room:suspend', () => {
+    const room = roomOfSocket(socket.id)
+    if (room?.phase !== 'playing') return
+    void socket.leave(room.code)
+    markDisconnected(socket.id)
+    publish(room)
   })
 
   socket.on('room:ready', (payload: { ready?: boolean }) => {
@@ -330,7 +372,7 @@ io.on('connection', (socket) => {
       startingRooms.add(room)
       try {
         const store = await accountStore()
-        await store.fundMatchPot(pot)
+        const balances = await store.fundMatchPot(pot)
         fundedRooms.set(room, { pot, seats })
         const sameSeats = room.members.every(member => member.seat === null || seats.get(member.seat) === member.playerId) &&
           room.members.filter(member => member.seat !== null).length === seats.size
@@ -338,7 +380,7 @@ io.on('connection', (socket) => {
           void settlePot(room, [])
           return ack?.({ ok: false, error: 'The room changed before the match started. Try again.' })
         }
-        walletChanged(pot.accounts)
+        for (const { id, coins } of balances) io.to(`wallet:${id}`).emit('wallet:changed', { accountId: id, coins })
       } catch (error) {
         if (error instanceof InsufficientMatchCoins) {
           const player = room.members.find(member => member.playerId === error.accountId)
@@ -350,7 +392,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    startMatch(room)
+    startMatch(room, Date.now() + 750 + MATCH_INTRO_MS)
     trackMatchStart(room, fundedRooms.get(room)?.pot.id)
     ack?.({ ok: true })
     io.to(room.code).emit('match:started', snapshot(room, true))
@@ -364,6 +406,14 @@ io.on('connection', (socket) => {
     socket.leave(room.code)
     const seat = seatOf(room, me.playerId)
     if (seat !== null) trackMatchActivity(room, seat, 'match.left')
+    if (room.phase === 'playing') {
+      const member = room.members.find(item => item.playerId === me.playerId)
+      if (member) member.forfeited = true
+      markDisconnected(socket.id)
+      if (seat !== null && eliminateSeat(room, seat)) settleResults(room)
+      publish(room)
+      return
+    }
     leaveRoom(room, me.playerId)
     if (room.members.length === 0 && room.phase !== 'finished') {
       trackMatchEnd(room, 'abandoned')
@@ -372,31 +422,41 @@ io.on('connection', (socket) => {
     publish(room)
   })
 
-  socket.on('match:roll', (_p: unknown, ack?: (r: unknown) => void) => {
+  socket.on('match:roll', (payload: { deadline?: number }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     const room = roomOfSocket(socket.id)
     if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
     const seat = seatOf(room, me.playerId)
     if (seat === null) return ack?.({ ok: false, error: 'No seat' })
+    if (payload?.deadline !== undefined && payload.deadline !== room.match?.deadline) {
+      return ack?.({ ok: false, error: 'Your turn changed.' })
+    }
 
     const result = performRoll(room, seat)
     ack?.('error' in result ? { ok: false, error: result.error } : { ok: true })
   })
 
-  socket.on('match:reaction', (payload: { kind?: unknown; to?: unknown }, reply?: (r: unknown) => void) => {
+  socket.on('match:reaction', (payload: { kind?: unknown; to?: unknown; tokenId?: unknown }, reply?: (r: unknown) => void) => {
     if (typeof reply !== 'function') return
     const room = roomOfSocket(socket.id)
     const sender = room?.members.find(member => member.socketId === socket.id && member.connected)
-    if (room?.phase !== 'playing' || !sender || sender.seat === null) return reply({ ok: false, error: 'Join a match first.' })
+    if (room?.phase !== 'playing' || !room.match || !sender || sender.seat === null ||
+      room.match.eliminated.includes(sender.seat)) return reply({ ok: false, error: 'Join an active match first.' })
     if (typeof payload?.kind !== 'string' || !reactions.has(payload.kind) || !room.members.some(
-      member => member.seat !== null && member.connected && member.seat === payload.to && member.seat !== sender.seat,
+      member => member.seat !== null && member.connected && member.seat === payload.to && member.seat !== sender.seat
+        && !room.match?.eliminated.includes(member.seat),
     )) return reply({ ok: false, error: 'Choose a connected player and a reaction.' })
+    const tokenId = payload.kind === 'bomb' ? undefined : payload.tokenId
+    if (tokenId !== undefined && !room.match.tokens.some(token => token.id === tokenId && token.seat === payload.to)) {
+      return reply({ ok: false, error: 'Choose a pawn belonging to that player.' })
+    }
     const now = Date.now()
     if (now < (reactionAvailableAt.get(room) ?? 0)) return reply({ ok: false, error: 'Wait for the current reaction to finish.' })
     // Reserve the room for the launch delay plus the visual effect.
     reactionAvailableAt.set(room, now + (payload.kind === 'bomb' ? 6900 : 4850))
     trackMatchActivity(room, sender.seat, 'match.reaction', payload.kind)
-    io.to(room.code).emit('match:reaction', { roomCode: room.code, kind: payload.kind, from: sender.seat, to: payload.to })
+    io.to(room.code).emit('match:reaction', { roomCode: room.code, kind: payload.kind, from: sender.seat,
+      to: payload.to, tokenId, serverNow: now, startsAt: now + REACTION_LEAD_MS })
     reply({ ok: true })
   })
 
@@ -411,18 +471,21 @@ io.on('connection', (socket) => {
     }
     const now = Date.now()
     if (now < (soundAvailableAt.get(room) ?? 0)) return reply({ ok: false, error: 'Give the sound a moment before playing another.' })
-    soundAvailableAt.set(room, now + (clip === 11 ? 6100 : 900))
+    soundAvailableAt.set(room, now + (clip === 11 ? SOUND_LEAD_MS + 6100 : 900))
     if (sender.seat !== null) trackMatchActivity(room, sender.seat, 'match.sound', 'Clip ' + clip)
-    io.to(room.code).emit('match:sound', { roomCode: room.code, clip })
+    io.to(room.code).emit('match:sound', { roomCode: room.code, clip, serverNow: now, startsAt: now + SOUND_LEAD_MS })
     reply({ ok: true })
   })
 
-  socket.on('match:move', (payload: { tokenId?: string }, ack?: (r: unknown) => void) => {
+  socket.on('match:move', (payload: { tokenId?: string; deadline?: number }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     const room = roomOfSocket(socket.id)
     if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
     const seat = seatOf(room, me.playerId)
     if (seat === null) return ack?.({ ok: false, error: 'No seat' })
+    if (payload?.deadline !== undefined && payload.deadline !== room.match?.deadline) {
+      return ack?.({ ok: false, error: 'Your turn changed.' })
+    }
     if (!payload?.tokenId) return ack?.({ ok: false, error: 'tokenId required' })
 
     const result = performMove(room, seat, payload.tokenId)
@@ -445,7 +508,12 @@ setInterval(() => {
   for (const room of roomsNeedingAttention(now)) {
     const m = room.match!
     if (m.phase === 'await-roll') {
-      performRoll(room, m.current)
+      const seat = m.current
+      if (missRoll(room)) {
+        trackMatchActivity(room, seat, 'match.eliminated', 'Five missed dice rolls')
+        settleResults(room)
+        publish(room)
+      } else performRoll(room, seat, false)
     } else if (m.phase === 'await-move') {
       const tokenId = autoPick(room)
       if (tokenId) performMove(room, m.current, tokenId)

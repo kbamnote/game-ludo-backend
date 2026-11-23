@@ -67,7 +67,8 @@ const appearances = Promise.all([a, b].map(s => new Promise(resolve => s.once('m
 const started = await call(a, 'room:start')
 if (!started.ok) throw new Error('start failed: ' + started.error)
 log('match started')
-for (const match of await appearances) {
+const matchStartSnapshots = await appearances
+for (const match of matchStartSnapshots) {
   assert.deepEqual(match.members[0].character, character)
   assert.equal(match.members[1].character, undefined)
 }
@@ -81,6 +82,13 @@ const notHost = await call(b, 'room:start')
 log('non-host start blocked:', notHost.ok === false)
 
 const sockets = { 0: a, 2: b }
+const opening = matchStartSnapshots[0].match
+assert.equal(opening.opensAt, matchStartSnapshots[1].match.opensAt)
+if (opening.opensAt > Date.now()) {
+  const early = await call(sockets[opening.current], 'match:roll')
+  assert.match(early.error, /countdown/)
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, opening.opensAt - Date.now()) + 30))
+}
 await new Promise((r) => setTimeout(r, 200))
 
 let turns = 0

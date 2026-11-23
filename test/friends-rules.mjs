@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { canStart, createRoom, doMove, doRoll, joinRoom, leaveRoom, setReady, setRoomVariant, startMatch } from '../dist/room.js'
+import { activeRoomFor, canStart, createRoom, doMove, doRoll, eliminateSeat, joinRoom, leaveRoom, markDisconnected, missRoll, setReady, setRoomVariant, snapshot, startMatch } from '../dist/room.js'
 import { HOME_STEP, createTokens, legalMoves } from '../dist/rules.js'
+import { TURN_MS } from '../dist/room.js'
 
 function roomWith(players, variant = 'classic') {
   const room = createRoom('host', 'Host')
@@ -13,6 +14,72 @@ function roomWith(players, variant = 'classic') {
   }
   return room
 }
+
+test('the shared match countdown protects the first roll and preserves a full turn', t => {
+  let now = 1000
+  t.mock.method(Date, 'now', () => now)
+  const room = roomWith(2)
+  const opensAt = now + 3750
+  const match = startMatch(room, opensAt)
+  assert.equal(snapshot(room).match.opensAt, opensAt)
+  assert.equal(match.deadline, opensAt + TURN_MS)
+  assert.match(doRoll(room, match.current).error, /countdown/)
+  assert.equal(missRoll(room), false)
+  now = opensAt
+  assert.equal(typeof doRoll(room, match.current).die, 'number')
+})
+
+test('only consecutive missed dice rolls eliminate the player and clear their pawns', t => {
+  t.mock.method(Math, 'random', () => 0)
+  const room = roomWith(2)
+  const match = startMatch(room)
+  const [first, second] = match.seats
+  function miss(seat) {
+    match.current = seat
+    match.phase = 'await-roll'
+    match.deadline = 0
+    if (missRoll(room)) return true
+    assert.equal(doRoll(room, seat, false).die, 1)
+    return false
+  }
+  assert.equal(miss(first), false)
+  assert.equal(match.missedRolls[first], 1)
+  match.current = first
+  assert.equal(doRoll(room, first).die, 1)
+  assert.equal(match.missedRolls[first], 0)
+  for (let i = 0; i < 4; i++) assert.equal(miss(first), false)
+  assert.equal(miss(first), true)
+  assert.equal(room.phase, 'finished')
+  assert.deepEqual(match.ranking, [second])
+  assert.deepEqual(snapshot(room).match.eliminated, [first])
+  assert.ok(match.tokens.every(token => token.seat === second))
+})
+
+test('a suspended account still has its live seat, and an eliminated account cannot resume as a player', () => {
+  const first = 'acct-resume-host'
+  const second = 'acct-resume-guest'
+  const room = createRoom(first, 'Host')
+  assert.equal(joinRoom(room.code, second, 'Guest', 'resume-guest').ok, true)
+  startMatch(room)
+  markDisconnected('resume-guest')
+  const saved = activeRoomFor(second)
+  assert.equal(saved?.code, room.code)
+  const seat = saved.members.find(member => member.playerId === second).seat
+  assert.equal(joinRoom(room.code, second, 'Guest', 'resume-new').ok, true)
+  assert.equal(room.members.find(member => member.socketId === 'resume-new').seat, seat)
+  eliminateSeat(room, seat)
+  assert.equal(activeRoomFor(second), undefined)
+})
+
+test('Team Up gives the prize places to the surviving team after eliminations', () => {
+  const room = roomWith(4, 'teams')
+  const match = startMatch(room)
+  assert.equal(eliminateSeat(room, 0), true)
+  assert.equal(room.phase, 'playing')
+  assert.equal(eliminateSeat(room, 2), true)
+  assert.equal(room.phase, 'finished')
+  assert.deepEqual(match.ranking, [1, 3])
+})
 
 test('two remaining Friends players sit opposite each other after the host leaves', () => {
   const room = roomWith(3)

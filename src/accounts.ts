@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { accountStore, AccountStorageUnavailable, type Account, type Provider } from './accountStore.js'
 import { trackActivity } from './adminTracking.js'
 import { readLocalMatchReport } from './localMatchReport.js'
+import { activeRoomFor } from './room.js'
 
 const WELCOME_COINS = 1000
 const WELCOME_DIAMONDS = 10
@@ -230,10 +231,13 @@ export async function serveAccounts(req: IncomingMessage, res: ServerResponse) {
       if (!account) throw new HttpError(410, 'Sign-in ended. Please try again.')
       return json(res, 200, await sessionFor(account, requestKey))
     }
-    if (pathname === '/auth/me' || pathname === '/auth/avatar' || pathname === '/auth/local-match') {
+    if (pathname === '/auth/me' || pathname === '/auth/avatar' || pathname === '/auth/local-match' || pathname === '/auth/active-room') {
       const account = await authenticatedAccount(req.headers.authorization?.match(/^Bearer (.+)$/i)?.[1])
       if (!account) throw new HttpError(401, 'Your session expired. Please sign in again.')
       if (req.method === 'GET' && pathname === '/auth/me') return json(res, 200, account)
+      if (req.method === 'GET' && pathname === '/auth/active-room') {
+        return json(res, 200, { code: activeRoomFor(account.id)?.code ?? null })
+      }
       if (req.method === 'POST' && pathname === '/auth/local-match') {
         const match = readLocalMatchReport(await body(req), account)
         if (!match) throw new HttpError(400, 'Invalid local match report')

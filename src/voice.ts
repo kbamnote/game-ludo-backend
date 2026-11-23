@@ -52,6 +52,7 @@ export function attachVoice(io: Server) {
     }
     const exitVoice = () => { clearTicket(); matchSessions.get(socket.id)?.() }
     socket.on('room:leave', exitVoice)
+    socket.on('room:suspend', exitVoice)
     socket.on('disconnect', exitVoice)
     socket.on('match:voice', (_request, reply) => {
       if (typeof reply !== 'function') return

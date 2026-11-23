@@ -15,6 +15,8 @@ import {
 export const MAX_SEATS = 4
 /** A seat that stalls this long has its turn played for it. */
 export const TURN_MS = 20_000
+export const MATCH_INTRO_MS = 9000
+export const MAX_MISSED_ROLLS = 5
 // Keep in sync with the mobile coronation presentation.
 const FIRST_CORONATION_MS = 12_500
 const SECOND_CORONATION_MS = 8_600
@@ -62,6 +64,7 @@ export interface Member {
   seat: Seat | null
   ready: boolean
   connected: boolean
+  forfeited?: boolean
 }
 
 export interface MatchState {
@@ -73,8 +76,11 @@ export interface MatchState {
   moves: Move[]
   consecutiveSixes: number
   ranking: Seat[]
+  eliminated: Seat[]
+  missedRolls: Partial<Record<Seat, number>>
   /** Epoch ms by which the current seat must act. */
   deadline: number
+  opensAt: number
   coronationUntil: number
 }
 
@@ -94,6 +100,7 @@ export interface Room {
 
 /** What a client is allowed to see. Identical for every member. */
 export interface RoomSnapshot {
+  serverNow: number
   publicTable: boolean
   entry: MatchEntry
   prize: number
@@ -110,7 +117,10 @@ export interface RoomSnapshot {
     phase: MatchPhase
     movableTokenIds: string[]
     ranking: Seat[]
+    eliminated: Seat[]
+    missedRolls: Partial<Record<Seat, number>>
     deadline: number
+    opensAt: number
   } | null
 }
 
@@ -164,6 +174,7 @@ export function joinRoom(code: string, playerId: string, name: string, socketId:
 
   const existing = room.members.find((m) => m.playerId === playerId)
   if (existing) {
+    if (existing.forfeited) return { ok: false, error: 'You left this match.' }
     // Reconnect: take the seat back rather than adding a duplicate.
     existing.socketId = socketId
     existing.connected = true
@@ -260,7 +271,7 @@ export function canStart(room: Room): string | null {
   return null
 }
 
-export function startMatch(room: Room): MatchState {
+export function startMatch(room: Room, opensAt = Date.now()): MatchState {
   const seats = room.members
     .map((m) => m.seat)
     .filter((s): s is Seat => s !== null)
@@ -275,7 +286,10 @@ export function startMatch(room: Room): MatchState {
     moves: [],
     consecutiveSixes: 0,
     ranking: [],
-    deadline: Date.now() + TURN_MS,
+    eliminated: [],
+    missedRolls: {},
+    opensAt,
+    deadline: opensAt + TURN_MS,
     coronationUntil: 0,
   }
 
@@ -294,12 +308,14 @@ export interface RollResult {
 }
 
 /** The server owns the dice — clients never send a value. */
-export function doRoll(room: Room, seat: Seat): RollResult | { error: string } {
+export function doRoll(room: Room, seat: Seat, manual = true): RollResult | { error: string } {
   const m = room.match
   if (!m || m.phase !== 'await-roll') return { error: 'Not accepting a roll' }
+  if (Date.now() < m.opensAt) return { error: 'Wait for the countdown to finish' }
   if (Date.now() < m.coronationUntil) return { error: 'Wait for the coronation to finish' }
   if (m.current !== seat) return { error: 'Not your turn' }
 
+  if (manual) m.missedRolls[seat] = 0
   const die = rollDie()
   const sixes = die === 6 ? m.consecutiveSixes + 1 : 0
   m.die = die
@@ -355,9 +371,10 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
   const partner = ((seat + 2) % MAX_SEATS) as Seat
   const finishedSeat = hasWon(m.tokens, seat)
   const quickWinner = room.variant === 'quick' && move.finishes
-  const teamWinner = room.variant === 'teams' && finishedSeat && hasWon(m.tokens, partner)
+  const teamWinner = room.variant === 'teams' && finishedSeat &&
+    (m.eliminated.includes(partner) || hasWon(m.tokens, partner))
   if (quickWinner || teamWinner) {
-    m.ranking = teamWinner ? [seat, partner] : [seat]
+    m.ranking = teamWinner && !m.eliminated.includes(partner) ? [seat, partner] : [seat]
     m.phase = 'ended'
     room.phase = 'finished'
     return { tokenId, path, captures: move.captures, finished: seat, ended: true }
@@ -369,7 +386,7 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
     finished = seat
   }
 
-  const remaining = m.seats.filter((s) => !m.ranking.includes(s))
+  const remaining = m.seats.filter((s) => !m.ranking.includes(s) && !m.eliminated.includes(s))
   if (remaining.length <= 1) {
     for (const s of remaining) if (!m.ranking.includes(s)) m.ranking.push(s)
     m.phase = 'ended'
@@ -406,7 +423,7 @@ function advance(m: MatchState) {
   let next = m.current
   for (let i = 1; i <= m.seats.length; i++) {
     const candidate = m.seats[(pos + i) % m.seats.length]
-    if (!m.ranking.includes(candidate)) {
+    if (!m.ranking.includes(candidate) && !m.eliminated.includes(candidate)) {
       next = candidate
       break
     }
@@ -417,6 +434,37 @@ function advance(m: MatchState) {
   m.consecutiveSixes = 0
   m.phase = 'await-roll'
   m.deadline = Date.now() + TURN_MS
+}
+
+export function eliminateSeat(room: Room, seat: Seat) {
+  const m = room.match
+  if (!m || room.phase !== 'playing' || !m.seats.includes(seat)
+    || m.eliminated.includes(seat) || m.ranking.includes(seat)) return false
+  m.eliminated.push(seat)
+  m.tokens = m.tokens.filter(token => token.seat !== seat)
+  room.lastActivity = Date.now()
+
+  const surviving = m.seats.filter(candidate => !m.eliminated.includes(candidate))
+  const remaining = surviving.filter(candidate => !m.ranking.includes(candidate))
+  const teams = [surviving.filter(candidate => candidate % 2 === 0), surviving.filter(candidate => candidate % 2 === 1)]
+  const winnerTeam = room.variant === 'teams' ? teams.find((team, index) => team.length > 0 &&
+    (teams[1 - index].length === 0 || team.every(member => hasWon(m.tokens, member)))) : undefined
+  if (winnerTeam || (room.variant !== 'teams' && remaining.length <= 1)) {
+    m.ranking = winnerTeam ?? [...m.ranking, ...remaining]
+    m.phase = 'ended'
+    m.die = null
+    m.moves = []
+    room.phase = 'finished'
+  } else if (m.current === seat) advance(m)
+  return true
+}
+
+export function missRoll(room: Room) {
+  const m = room.match
+  if (!m || room.phase !== 'playing' || m.phase !== 'await-roll' || Date.now() < m.deadline) return false
+  const seat = m.current
+  m.missedRolls[seat] = (m.missedRolls[seat] ?? 0) + 1
+  return m.missedRolls[seat] >= MAX_MISSED_ROLLS && eliminateSeat(room, seat)
 }
 
 /** Picks a move for a seat that ran out of time or dropped off. */
@@ -437,6 +485,7 @@ export function autoPick(room: Room): string | null {
 
 export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
   return {
+    serverNow: Date.now(),
     code: room.code,
     hostId: room.hostId,
     publicTable: room.publicTable,
@@ -461,7 +510,10 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
           phase: room.match.phase,
           movableTokenIds: room.match.moves.map((mv) => mv.tokenId),
           ranking: room.match.ranking,
+          eliminated: room.match.eliminated,
+          missedRolls: room.match.missedRolls,
           deadline: room.match.deadline,
+          opensAt: room.match.opensAt,
         }
       : null,
   }
@@ -469,6 +521,12 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
 
 export function allRooms(): Room[] {
   return [...rooms.values()]
+}
+
+export function activeRoomFor(accountId: string) {
+  return allRooms().filter(room => room.phase === 'playing' && room.members.some(member =>
+    member.playerId === accountId && !member.forfeited && member.seat !== null && !room.match?.eliminated.includes(member.seat),
+  )).sort((a, b) => b.lastActivity - a.lastActivity)[0]
 }
 
 export function sweepIdleRooms() {
