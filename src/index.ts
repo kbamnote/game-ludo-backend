@@ -183,8 +183,8 @@ function performRoll(room: Room, seat: Seat, manual = true) {
   return result
 }
 
-function performMove(room: Room, seat: Seat, tokenId: string) {
-  const result = doMove(room, seat, tokenId)
+function performMove(room: Room, seat: Seat, tokenId: string, weapon?: unknown) {
+  const result = doMove(room, seat, tokenId, weapon)
   if ('error' in result) return result
   trackMatchActivity(room, seat, 'match.move', result.path.length + ' steps' +
     (result.captures.length ? ' · ' + result.captures.length + ' captured' : ''))
@@ -193,6 +193,7 @@ function performMove(room: Room, seat: Seat, tokenId: string) {
     tokenId: result.tokenId,
     path: result.path,
     captures: result.captures,
+    weapon: result.weapon,
     snapshot: snapshot(room),
   })
   settleResults(room)
@@ -477,7 +478,7 @@ io.on('connection', (socket) => {
     reply({ ok: true })
   })
 
-  socket.on('match:move', (payload: { tokenId?: string; deadline?: number }, ack?: (r: unknown) => void) => {
+  socket.on('match:move', (payload: { tokenId?: string; weapon?: unknown; deadline?: number }, ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     const room = roomOfSocket(socket.id)
     if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
@@ -488,7 +489,7 @@ io.on('connection', (socket) => {
     }
     if (!payload?.tokenId) return ack?.({ ok: false, error: 'tokenId required' })
 
-    const result = performMove(room, seat, payload.tokenId)
+    const result = performMove(room, seat, payload.tokenId, payload.weapon)
     ack?.('error' in result ? { ok: false, error: result.error } : { ok: true })
   })
 

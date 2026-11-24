@@ -101,7 +101,11 @@ test('Quick ends as soon as a single character makes it home', t => {
   assert.deepEqual(match.ranking, [0])
 })
 
-test('Friends pauses the next turn for the gold throne shot and keeps silver shorter', t => {
+// The finishing character is airlifted to its yard sofa before the throne
+// shot, so the clock has to cover both presentations. Mirrors HELICOPTER_MS.
+const HOIST_MS = 6600
+
+test('Friends pauses the next turn for the hoist and gold throne shot, and keeps silver shorter', t => {
   const room = roomWith(4)
   t.mock.method(Math, 'random', () => 0)
   let now = Date.now()
@@ -114,7 +118,7 @@ test('Friends pauses the next turn for the gold throne shot and keeps silver sho
     match.current = seat
     assert.equal(doRoll(room, seat).moves.length, 1)
     assert.equal(doMove(room, seat, tokens[0].id).ended, false)
-    assert.equal(match.coronationUntil, now + 280 + duration)
+    assert.equal(match.coronationUntil, now + 280 + HOIST_MS + duration)
     now = match.coronationUntil - 1
     assert.match(doRoll(room, match.current).error, /coronation/)
     now++

@@ -1,4 +1,5 @@
 import type { MatchEntry } from './matchEntry.js'
+import { DEFAULT_WEAPON, readWeapon, type Weapon } from './weapons.js'
 import {
   applyMove,
   createTokens,
@@ -20,6 +21,10 @@ export const MAX_MISSED_ROLLS = 5
 // Keep in sync with the mobile coronation presentation.
 const FIRST_CORONATION_MS = 12_500
 const SECOND_CORONATION_MS = 8_600
+// Keep in sync with HELICOPTER_MS in the mobile game/moveTiming.ts.
+const HELICOPTER_MS = 6600
+// Keep in sync with STRIKE_MS in the mobile game/moveTiming.ts.
+const STRIKE_MS = 1200
 /** Rooms with nobody connected are swept after this long. */
 export const ROOM_TTL_MS = 30 * 60_000
 
@@ -350,11 +355,12 @@ export interface MoveResult {
   tokenId: string
   path: number[]
   captures: string[]
+  weapon?: Weapon
   finished: Seat | null
   ended: boolean
 }
 
-export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { error: string } {
+export function doMove(room: Room, seat: Seat, tokenId: string, weapon?: unknown): MoveResult | { error: string } {
   const m = room.match
   if (!m || m.phase !== 'await-move') return { error: 'Not accepting a move' }
   if (m.current !== seat) return { error: 'Not your turn' }
@@ -363,6 +369,8 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
   if (!move) return { error: 'Illegal move' }
 
   const path = move.from === YARD ? [0] : rangeInclusive(move.from + 1, move.to)
+  // The attacker picks how the capture plays out; anything else is ignored.
+  const strike = move.captures.length ? (readWeapon(weapon) ?? DEFAULT_WEAPON) : undefined
 
   m.tokens = applyMove(m.tokens, move)
   m.moves = []
@@ -377,7 +385,7 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
     m.ranking = teamWinner && !m.eliminated.includes(partner) ? [seat, partner] : [seat]
     m.phase = 'ended'
     room.phase = 'finished'
-    return { tokenId, path, captures: move.captures, finished: seat, ended: true }
+    return { tokenId, path, captures: move.captures, weapon: strike, finished: seat, ended: true }
   }
 
   let finished: Seat | null = null
@@ -391,7 +399,7 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
     for (const s of remaining) if (!m.ranking.includes(s)) m.ranking.push(s)
     m.phase = 'ended'
     room.phase = 'finished'
-    return { tokenId, path, captures: move.captures, finished, ended: true }
+    return { tokenId, path, captures: move.captures, weapon: strike, finished, ended: true }
   }
 
   if (grantsExtraTurn(m.die ?? 0, move) && !m.ranking.includes(seat)) {
@@ -401,15 +409,19 @@ export function doMove(room: Room, seat: Seat, tokenId: string): MoveResult | { 
     advance(m)
   }
 
-  // Give the next decision its full turn clock after the rescue presentation.
-  if (move.captures.length) m.deadline += path.length * 280 + move.captures.length * 6500
+  // Give the next decision its full turn clock after whatever the clients
+  // present: the walk, then the rescue convoy or the helicopter hoist, then
+  // any coronation. A finishing move never captures, so these never overlap.
+  const walk = path.length * 280
+  let presentation = 0
+  if (move.captures.length) presentation += walk + STRIKE_MS + move.captures.length * 6500
+  if (move.finishes) presentation += walk + HELICOPTER_MS
   if (room.variant !== 'teams' && finished !== null && m.ranking.length <= 2) {
-    const duration = m.ranking.length === 1 ? FIRST_CORONATION_MS : SECOND_CORONATION_MS
-    const presentation = path.length * 280 + duration
+    presentation += m.ranking.length === 1 ? FIRST_CORONATION_MS : SECOND_CORONATION_MS
     m.coronationUntil = Date.now() + presentation
-    m.deadline += presentation
   }
-  return { tokenId, path, captures: move.captures, finished, ended: false }
+  m.deadline += presentation
+  return { tokenId, path, captures: move.captures, weapon: strike, finished, ended: false }
 }
 
 function rangeInclusive(from: number, to: number): number[] {
