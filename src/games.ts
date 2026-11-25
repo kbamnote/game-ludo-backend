@@ -32,7 +32,8 @@ const HELICOPTER_MS = 6600
 const MELEE_MS = 1500
 const SUPER_MS = 3300
 /** Riding a snake down, and climbing a ladder up. */
-export const SLIDE_MS = 1700
+export const SLIDE_MS = 4450
+export const SNAKES_VICTORY_MS = 5200
 export const CLIMB_MS = 1500
 
 /**

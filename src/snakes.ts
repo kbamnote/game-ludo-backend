@@ -3,9 +3,8 @@
  * render-only geometry — the server owns the dice and the moves, and the
  * client only has to agree with it.
  *
- * The same four characters a seat plays in Ludo race up a hundred squares
- * instead of round a track, so a turn is still "pick one of your four and
- * move it". Nobody is captured here; the board does the damage.
+ * Each player races one character to square 100. A snake or ladder
+ * changes the destination of the move.
  */
 import type { Seat, Token } from './rules.js'
 
@@ -13,18 +12,23 @@ export const COLUMNS = 10
 export const ROWS = 10
 /** Squares 1..100. */
 export const SQUARES = COLUMNS * ROWS
-/** Where a pawn waits before its first move. No six is needed to leave it. */
+/** Where a character waits before its first move. */
 export const START = 0
+/**
+ * The roll that brings a waiting character onto the board, landing it on
+ * square 1. Until it comes up, that player's turn passes.
+ */
+export const ENTRY_DIE = 1
 /** The last square. A pawn has to land on it exactly. */
 export const GOAL = SQUARES
-export const TOKENS_PER_SEAT = 4
+export const TOKENS_PER_SEAT = 1
 
 /**
  * The classic board. Every ladder foot and snake head is unique, and 80
  * climbs straight to the win, so the last stretch is worth racing for.
  */
 export const LADDERS: ReadonlyMap<number, number> = new Map([
-  [1, 38], [4, 14], [9, 31], [21, 42], [28, 84], [36, 44], [51, 67], [71, 91], [80, 100],
+  [2, 38], [4, 14], [9, 31], [21, 42], [28, 84], [36, 44], [51, 67], [71, 91], [80, 100],
 ])
 export const SNAKES: ReadonlyMap<number, number> = new Map([
   [16, 6], [47, 26], [49, 11], [56, 53], [62, 19], [64, 60], [87, 24], [93, 73], [95, 75], [98, 78],
@@ -73,12 +77,14 @@ export function createTokens(seats: Seat[]): Token[] {
 /**
  * Every legal move for `seat` with `die`. A pawn that would overshoot 100
  * cannot move at all, so the last few squares have to be rolled exactly — if
- * none of the four can use the die, the turn passes.
+ * the piece cannot use the die, the turn passes.
  */
 export function legalMoves(tokens: Token[], seat: Seat, die: number): SnakeMove[] {
   const moves: SnakeMove[] = []
   for (const token of tokens) {
     if (token.seat !== seat || token.progress >= GOAL) continue
+    // A waiting character only steps onto the board on a one.
+    if (token.progress === START && die !== ENTRY_DIE) continue
     const landing = token.progress + die
     if (landing > GOAL) continue
     const ride = rideFor(landing)
@@ -107,7 +113,8 @@ export function grantsExtraTurn(die: number, move: SnakeMove | null): boolean {
 }
 
 export function hasWon(tokens: Token[], seat: Seat): boolean {
-  return tokens.filter(token => token.seat === seat).every(token => token.progress === GOAL)
+  const pieces = tokens.filter(token => token.seat === seat)
+  return pieces.length > 0 && pieces.every(token => token.progress === GOAL)
 }
 
 export function tokensHome(tokens: Token[], seat: Seat): number {

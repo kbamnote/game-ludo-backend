@@ -23,13 +23,35 @@ const only = (tokens, seat, die) => {
   return moves[0]
 }
 
-test('every seat starts with four pawns waiting off the board', () => {
+test('every seat starts with one pawn waiting off the board', () => {
   const tokens = createTokens(seats)
-  assert.equal(tokens.length, 8)
+  assert.equal(tokens.length, 2)
   assert.equal(tokens.every(token => token.progress === START), true)
-  // No six is needed to set off, so the first roll always has four options.
-  assert.equal(legalMoves(tokens, 0, 1).length, 4)
+  assert.equal(legalMoves(tokens, 0, 1).length, 1)
   assert.equal(legalMoves(tokens, 0, 1).every(move => move.entersBoard), true)
+})
+
+test('a character only comes out on a one, and comes out onto square 1', () => {
+  const tokens = createTokens(seats)
+  for (const die of [2, 3, 4, 5, 6]) {
+    assert.deepEqual(legalMoves(tokens, 0, die), [],
+      `a ${die} should leave a waiting character where it is`)
+  }
+  const out = only(tokens, 0, 1)
+  assert.equal(out.entersBoard, true)
+  assert.equal(out.landing, 1)
+  assert.equal(out.to, 1)
+  // Square 1 has to stay clear of both, or every character would be carried
+  // off the moment it came out.
+  assert.equal(LADDERS.has(1), false)
+  assert.equal(SNAKES.has(1), false)
+
+  // Once it is on the board every die moves it, including another one.
+  const moving = applyMove(tokens, out)
+  for (const die of [1, 2, 3, 4, 5, 6]) {
+    assert.equal(legalMoves(moving, 0, die).length, 1,
+      `a ${die} should move a character that is already out`)
+  }
 })
 
 test('the board is the classic one, and no square is both a snake and a ladder', () => {
@@ -48,14 +70,20 @@ test('the board is the classic one, and no square is both a snake and a ladder',
 
 test('a ladder carries the pawn up and a snake drops it, both in one move', () => {
   const tokens = createTokens(seats)
-  // From the start pad, a one lands on square 1 — the foot of the long ladder.
-  const climb = only(tokens, 0, 1)
-  assert.equal(climb.landing, 1)
+  // A one brings the character out onto square 1, which carries nothing.
+  const entry = only(tokens, 0, 1)
+  assert.equal(entry.landing, 1)
+  assert.equal(entry.to, 1)
+  assert.equal(entry.ride, null)
+
+  // Another one steps it onto square 2 — the foot of the long ladder.
+  const climb = only(applyMove(tokens, entry), 0, 1)
+  assert.equal(climb.landing, 2)
   assert.equal(climb.to, 38)
-  assert.deepEqual(climb.ride, { kind: 'ladder', from: 1, to: 38 })
+  assert.deepEqual(climb.ride, { kind: 'ladder', from: 2, to: 38 })
 
   // Walk a pawn to 15, then a one puts its head in the snake at 16.
-  const at15 = applyMove(tokens, { ...only(tokens, 0, 1), to: 15, landing: 15, ride: null })
+  const at15 = applyMove(tokens, { ...entry, to: 15, landing: 15, ride: null })
   const bitten = only(at15, 0, 1)
   assert.equal(bitten.landing, 16)
   assert.equal(bitten.to, 6)
@@ -69,10 +97,10 @@ test('a ladder carries the pawn up and a snake drops it, both in one move', () =
 test('the goal has to be rolled exactly, and overshooting is not a move at all', () => {
   const tokens = createTokens(seats).map(token =>
     token.id === '0-0' ? { ...token, progress: 97 } : token)
-  // 97 + 4 would be 101: that pawn cannot move, so only the other three can.
+  // 97 + 4 would be 101: that pawn cannot move, so the player must pass.
   const four = legalMoves(tokens, 0, 4)
   assert.equal(four.some(move => move.tokenId === '0-0'), false)
-  assert.equal(four.length, 3)
+  assert.equal(four.length, 0)
 
   const home = legalMoves(tokens, 0, 3).find(move => move.tokenId === '0-0')
   assert.equal(home.to, GOAL)
@@ -96,7 +124,7 @@ test('a square 98 roll is a snake, not a win', () => {
 
 test('a six rolls again, a finish rolls again, and nothing else does', () => {
   const tokens = createTokens(seats)
-  const plain = only(tokens, 0, 2)
+  const plain = only(applyMove(tokens, only(tokens, 0, 1)), 0, 2)
   assert.equal(grantsExtraTurn(6, plain), true)
   assert.equal(grantsExtraTurn(2, plain), false)
   assert.equal(grantsExtraTurn(6, null), true)
@@ -104,7 +132,7 @@ test('a six rolls again, a finish rolls again, and nothing else does', () => {
   assert.equal(grantsExtraTurn(3, { ...plain, finishes: true }), true)
 })
 
-test('the seat wins only when all four pawns are home', () => {
+test('the seat wins only when its pawn reaches square 100', () => {
   let tokens = createTokens(seats)
   assert.equal(hasWon(tokens, 0), false)
   tokens = tokens.map(token => (token.seat === 0 ? { ...token, progress: GOAL } : token))
@@ -115,7 +143,8 @@ test('the seat wins only when all four pawns are home', () => {
 })
 
 /* ── the room layer, shared with Ludo ── */
-import { createRoom, doMove, doRoll, joinRoom, snapshot, startMatch } from '../dist/room.js'
+import { createRoom, doMove, doRoll, fillWithBots, joinRoom, snapshot, startMatch } from '../dist/room.js'
+import { SNAKES_VICTORY_MS, walkMs } from '../dist/games.js'
 
 /**
  * Rooms get a random six-digit code and retry until it is unused, so the
@@ -136,21 +165,40 @@ test('a snakes room plays through the same room machinery as a ludo one', t => {
   t.mock.method(Math, 'random', () => 0)   // every roll is a one
 
   const match = startMatch(room, 0)
-  assert.equal(match.tokens.length, 8)
+  assert.equal(match.tokens.length, 2)
   assert.equal(match.tokens.every(token => token.progress === START), true,
     'snakes pawns start on the pad, not in a yard')
 
   const rolled = doRoll(room, match.current)
   assert.equal(rolled.die, 1)
-  assert.equal(rolled.moves.length, 4, 'all four pawns can set off without a six')
+  assert.equal(rolled.moves.length, 1, 'a one is what brings the pawn out')
 
   const moved = doMove(room, match.current, rolled.moves[0].tokenId)
-  // The pawn walks only as far as the die took it...
+  // The pawn walks only as far as the die took it, and square 1 is bare.
   assert.deepEqual(moved.path, [1])
-  // ...and the ladder it landed on travels with the move as its own beat.
-  assert.deepEqual(moved.ride, { kind: 'ladder', from: 1, to: 38 })
+  assert.equal(moved.ride, null)
   assert.equal(moved.captures.length, 0, 'nobody is ever captured in snakes')
-  assert.equal(match.tokens.find(token => token.id === moved.tokenId).progress, 38)
+  assert.equal(match.tokens.find(token => token.id === moved.tokenId).progress, 1)
+})
+
+test('Square 100 pauses the next roll for the first winner in a four-player match', t => {
+  const room = twoSeatRoom('snakes')
+  fillWithBots(room)
+  const match = startMatch(room, 0)
+  const seat = match.current
+  const pawn = match.tokens.find(token => token.seat === seat)
+  pawn.progress = 98
+  t.mock.method(Math, 'random', () => .2)
+  const now = 50_000
+  const clock = t.mock.method(Date, 'now', () => now)
+  assert.equal(doRoll(room, seat).die, 2)
+  const move = doMove(room, seat, pawn.id)
+  assert.equal(move.ended, false)
+  assert.equal(match.ranking[0], seat)
+  assert.equal(match.coronationUntil, now + walkMs(move.path.length) + SNAKES_VICTORY_MS)
+  assert.match(doRoll(room, match.current).error, /coronation/)
+  clock.mock.mockImplementation(() => match.coronationUntil)
+  assert.equal(doRoll(room, match.current).die, 2)
 })
 
 test('a ludo room is untouched by the game swap', t => {

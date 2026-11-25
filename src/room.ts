@@ -1,5 +1,5 @@
 import type { MatchEntry } from './matchEntry.js'
-import { rulesFor, walkMs, type AnyMove, type GameId } from './games.js'
+import { rulesFor, SNAKES_VICTORY_MS, walkMs, type AnyMove, type GameId } from './games.js'
 import type { Ride } from './snakes.js'
 import { DEFAULT_WEAPON, isRanged, readWeapon, type Weapon } from './weapons.js'
 import {
@@ -505,8 +505,12 @@ export function doMove(room: Room, seat: Seat, tokenId: string, weapon?: unknown
   // and then any coronation.
   const walk = walkMs(path.length)
   let presentation = walk + rules.presentationMs(move, strike, walk)
-  if (room.variant !== 'teams' && finished !== null && m.ranking.length <= 2) {
+  if (room.game === 'ludo' && room.variant !== 'teams' && finished !== null && m.ranking.length <= 2) {
     presentation += m.ranking.length === 1 ? FIRST_CORONATION_MS : SECOND_CORONATION_MS
+    m.coronationUntil = Date.now() + presentation
+  }
+  if (room.game === 'snakes' && finished !== null && m.ranking.length === 1) {
+    presentation += SNAKES_VICTORY_MS
     m.coronationUntil = Date.now() + presentation
   }
   m.deadline += presentation
@@ -577,6 +581,7 @@ export function autoPick(room: Room): string | null {
   if (!m || m.phase !== 'await-move' || m.moves.length === 0) return null
   // Prefer a capture, then the furthest advance — never a random no-op.
   const best = [...m.moves].sort((a, b) => {
+    if (room.game === 'snakes') return (b.to - b.from) - (a.to - a.from)
     const ca = a.captures.length ? 1 : 0
     const cb = b.captures.length ? 1 : 0
     if (ca !== cb) return cb - ca
