@@ -14,3 +14,19 @@ export const DEFAULT_WEAPON: Weapon = 'sword'
 export function readWeapon(value: unknown): Weapon | undefined {
   return WEAPONS.find(weapon => weapon === value)
 }
+
+/** A bot chooses for itself, so its captures are not all the same. */
+export function randomWeapon(): Weapon {
+  return WEAPONS[Math.floor(Math.random() * WEAPONS.length)]
+}
+
+/** Close-range weapons: the attacker walks over and strikes in contact. */
+export const MELEE_WEAPONS: readonly Weapon[] = ['punch', 'sword']
+
+/**
+ * Anything else is a thrown power, cast from where the attacker stands before
+ * it moves at all. That changes how long the clients spend on the capture.
+ */
+export function isRanged(weapon: Weapon | undefined): boolean {
+  return weapon !== undefined && !MELEE_WEAPONS.includes(weapon)
+}

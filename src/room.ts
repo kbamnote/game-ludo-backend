@@ -1,5 +1,7 @@
 import type { MatchEntry } from './matchEntry.js'
-import { DEFAULT_WEAPON, readWeapon, type Weapon } from './weapons.js'
+import { rulesFor, walkMs, type AnyMove, type GameId } from './games.js'
+import type { Ride } from './snakes.js'
+import { DEFAULT_WEAPON, isRanged, readWeapon, type Weapon } from './weapons.js'
 import {
   applyMove,
   createTokens,
@@ -23,16 +25,41 @@ const FIRST_CORONATION_MS = 12_500
 const SECOND_CORONATION_MS = 8_600
 // Keep in sync with HELICOPTER_MS in the mobile game/moveTiming.ts.
 const HELICOPTER_MS = 6600
-// Keep in sync with STRIKE_MS in the mobile game/moveTiming.ts.
-const STRIKE_MS = 1200
+// Keep in sync with MELEE_MS and SUPER_MS in the mobile game/moveTiming.ts.
+const MELEE_MS = 1500
+const SUPER_MS = 3300
 /** Rooms with nobody connected are swept after this long. */
 export const ROOM_TTL_MS = 30 * 60_000
+/** How long a bot pauses before acting, so a table does not snap past the eye. */
+export const BOT_THINK_MS = 1100
+/** How long a public table holds its empty seats open for real players. */
+export const PUBLIC_FILL_MS = 12_000
 
 export type RoomPhase = 'lobby' | 'playing' | 'finished'
 export type MatchPhase = 'await-roll' | 'await-move' | 'ended'
 export type GameVariant = 'classic' | 'teams' | 'quick'
+/** How many seats a table fills before it plays. */
+export type TableSize = 2 | 4
+/** What a public table is: which game, how many seats, and which ruleset. */
+export interface TableKind {
+  size: TableSize
+  variant: GameVariant
+}
+/**
+ * The three online tables, as the lobby offers them. An older client that
+ * sends nothing still gets the four-player classic table it expects.
+ */
+export function readTableKind(value: unknown): TableKind | undefined {
+  if (value === undefined || value === null || value === 'classic') return { size: 4, variant: 'classic' }
+  if (value === 'duel') return { size: 2, variant: 'classic' }
+  if (value === 'teams') return { size: 4, variant: 'teams' }
+  return undefined
+}
+
 const seatOrder: Seat[] = [0, 1, 2, 3]
 const friendsSeatOrder: Seat[] = [0, 2, 1, 3]
+/** Stand-in players, so a public table never waits on strangers forever. */
+const BOT_NAMES = ['Rover', 'Pixel', 'Scout', 'Nimbus', 'Comet', 'Juno', 'Bolt', 'Echo']
 
 interface Character {
   model: Seat | 4
@@ -65,6 +92,8 @@ export interface Member {
   character?: Character
   playerId: string
   name: string
+  /** Played by the server. Bots hold no account and never touch the pot. */
+  bot?: true
   socketId: string | null
   seat: Seat | null
   ready: boolean
@@ -78,7 +107,7 @@ export interface MatchState {
   current: Seat
   die: number | null
   phase: MatchPhase
-  moves: Move[]
+  moves: AnyMove[]
   consecutiveSixes: number
   ranking: Seat[]
   eliminated: Seat[]
@@ -91,9 +120,15 @@ export interface MatchState {
 
 export interface Room {
   publicTable: boolean
+  /** Which game this room is playing. Everything else about it is the same. */
+  game: GameId
   entry: MatchEntry
   prize: number
   variant: GameVariant
+  /** Seats this table fills before it starts. */
+  size: TableSize
+  /** When a public table stops waiting for people and sits bots down. */
+  fillBy: number
   code: string
   hostId: string
   members: Member[]
@@ -107,9 +142,12 @@ export interface Room {
 export interface RoomSnapshot {
   serverNow: number
   publicTable: boolean
+  game: GameId
   entry: MatchEntry
   prize: number
   variant: GameVariant
+  size: TableSize
+  fillBy: number
   code: string
   hostId: string
   phase: RoomPhase
@@ -137,15 +175,20 @@ function randomCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-export function createRoom(playerId: string, name: string, publicTable = false, character?: Character, entry: MatchEntry = 0): Room {
+export function createRoom(playerId: string, name: string, publicTable = false, character?: Character,
+  entry: MatchEntry = 0, table: TableKind = { size: MAX_SEATS, variant: 'classic' },
+  game: GameId = 'ludo'): Room {
   let code = randomCode()
   while (rooms.has(code)) code = randomCode()
 
   const room: Room = {
     publicTable,
+    game,
     entry,
     prize: 0,
-    variant: 'classic',
+    variant: table.variant,
+    size: table.size,
+    fillBy: Date.now() + PUBLIC_FILL_MS,
     code,
     hostId: playerId,
     members: [{ playerId, name, character, socketId: null, seat: 0, ready: true, connected: true }],
@@ -191,14 +234,57 @@ export function joinRoom(code: string, playerId: string, name: string, socketId:
 
   if (room.phase !== 'lobby') return { ok: false, error: 'That match has already started' }
 
+  if (room.members.length >= room.size) return { ok: false, error: 'Room is full' }
   const taken = new Set(room.members.map((m) => m.seat))
-  const seat = (room.publicTable ? seatOrder : friendsSeatOrder).find((s) => !taken.has(s))
+  const seat = seatOrderFor(room).find((s) => !taken.has(s))
   if (seat === undefined) return { ok: false, error: 'Room is full' }
 
-  room.members.push({ playerId, name, character, socketId, seat, ready: false, connected: true })
+  // Nobody queues for a public table without meaning to play, so they arrive
+  // ready and the table starts itself.
+  room.members.push({ playerId, name, character, socketId, seat, ready: room.publicTable, connected: true })
   alignOppositeSeats(room)
   room.lastActivity = Date.now()
   return { ok: true, room }
+}
+
+/** Two at a table face each other; four go round it. */
+function seatOrderFor(room: Room): Seat[] {
+  if (room.size === 2) return [0, 2]
+  return room.publicTable ? seatOrder : friendsSeatOrder
+}
+
+/* ───────────────────────────── bots ───────────────────────────── */
+
+export function isBotSeat(room: Room, seat: Seat | null): boolean {
+  return seat !== null && room.members.some(member => member.seat === seat && member.bot)
+}
+
+/** Everyone at the table who is a real person. */
+export function humansOf(room: Room): Member[] {
+  return room.members.filter(member => !member.bot)
+}
+
+/** Sits a bot in every empty seat, so a public table never stalls on strangers. */
+export function fillWithBots(room: Room) {
+  const taken = new Set(room.members.map(member => member.seat))
+  const used = new Set(room.members.map(member => member.name))
+  for (const seat of seatOrderFor(room)) {
+    if (room.members.length >= room.size || taken.has(seat)) continue
+    const name = BOT_NAMES.find(candidate => !used.has(candidate)) ?? 'Bot ' + (seat + 1)
+    used.add(name)
+    taken.add(seat)
+    room.members.push({
+      playerId: 'bot:' + room.code + ':' + seat,
+      name,
+      bot: true,
+      character: { model: seat },
+      socketId: null,
+      seat,
+      ready: true,
+      connected: true,
+    })
+  }
+  room.lastActivity = Date.now()
 }
 
 function alignOppositeSeats(room: Room) {
@@ -284,7 +370,7 @@ export function startMatch(room: Room, opensAt = Date.now()): MatchState {
 
   const match: MatchState = {
     seats,
-    tokens: createTokens(seats),
+    tokens: rulesFor(room.game).createTokens(seats),
     current: seats[0],
     die: null,
     phase: 'await-roll',
@@ -299,7 +385,7 @@ export function startMatch(room: Room, opensAt = Date.now()): MatchState {
   }
 
   room.match = match
-  room.prize = room.entry * seats.length
+  room.prize = room.entry * humansOf(room).filter(member => member.seat !== null).length
   room.phase = 'playing'
   room.lastActivity = Date.now()
   return match
@@ -329,31 +415,33 @@ export function doRoll(room: Room, seat: Seat, manual = true): RollResult | { er
 
   if (sixes >= 3) {
     m.consecutiveSixes = 0
-    advance(m)
+    advance(room)
     return { die, moves: [], passed: true }
   }
 
-  const moves = legalMoves(m.tokens, seat, die, room.variant === 'teams')
+  const moves = rulesFor(room.game).legalMoves(m.tokens, seat, die, room.variant === 'teams')
   m.moves = moves
 
   if (moves.length === 0) {
     if (die === 6) {
       m.phase = 'await-roll'
-      m.deadline = Date.now() + TURN_MS
+      m.deadline = Date.now() + turnClock(room)
     } else {
-      advance(m)
+      advance(room)
     }
     return { die, moves: [], passed: true }
   }
 
   m.phase = 'await-move'
-  m.deadline = Date.now() + TURN_MS
+  m.deadline = Date.now() + turnClock(room)
   return { die, moves, passed: false }
 }
 
 export interface MoveResult {
   tokenId: string
   path: number[]
+  /** The snake or ladder the pawn takes once it lands, in Snakes. */
+  ride?: Ride | null
   captures: string[]
   weapon?: Weapon
   finished: Seat | null
@@ -368,24 +456,26 @@ export function doMove(room: Room, seat: Seat, tokenId: string, weapon?: unknown
   const move = m.moves.find((mv) => mv.tokenId === tokenId)
   if (!move) return { error: 'Illegal move' }
 
-  const path = move.from === YARD ? [0] : rangeInclusive(move.from + 1, move.to)
+  const rules = rulesFor(room.game)
+  const path = rules.walkPath(move)
+  const ride = (move as { ride?: Ride | null }).ride ?? null
   // The attacker picks how the capture plays out; anything else is ignored.
   const strike = move.captures.length ? (readWeapon(weapon) ?? DEFAULT_WEAPON) : undefined
 
-  m.tokens = applyMove(m.tokens, move)
+  m.tokens = rules.applyMove(m.tokens, move)
   m.moves = []
   room.lastActivity = Date.now()
 
   const partner = ((seat + 2) % MAX_SEATS) as Seat
-  const finishedSeat = hasWon(m.tokens, seat)
+  const finishedSeat = rules.hasWon(m.tokens, seat)
   const quickWinner = room.variant === 'quick' && move.finishes
   const teamWinner = room.variant === 'teams' && finishedSeat &&
-    (m.eliminated.includes(partner) || hasWon(m.tokens, partner))
+    (m.eliminated.includes(partner) || rules.hasWon(m.tokens, partner))
   if (quickWinner || teamWinner) {
     m.ranking = teamWinner && !m.eliminated.includes(partner) ? [seat, partner] : [seat]
     m.phase = 'ended'
     room.phase = 'finished'
-    return { tokenId, path, captures: move.captures, weapon: strike, finished: seat, ended: true }
+    return { tokenId, path, ride, captures: move.captures, weapon: strike, finished: seat, ended: true }
   }
 
   let finished: Seat | null = null
@@ -399,38 +489,40 @@ export function doMove(room: Room, seat: Seat, tokenId: string, weapon?: unknown
     for (const s of remaining) if (!m.ranking.includes(s)) m.ranking.push(s)
     m.phase = 'ended'
     room.phase = 'finished'
-    return { tokenId, path, captures: move.captures, weapon: strike, finished, ended: true }
+    return { tokenId, path, ride, captures: move.captures, weapon: strike, finished, ended: true }
   }
 
-  if (grantsExtraTurn(m.die ?? 0, move) && !m.ranking.includes(seat)) {
+  if (rules.grantsExtraTurn(m.die ?? 0, move) && !m.ranking.includes(seat)) {
     m.phase = 'await-roll'
-    m.deadline = Date.now() + TURN_MS
+    m.deadline = Date.now() + turnClock(room)
   } else {
-    advance(m)
+    advance(room)
   }
 
   // Give the next decision its full turn clock after whatever the clients
-  // present: the walk, then the rescue convoy or the helicopter hoist, then
-  // any coronation. A finishing move never captures, so these never overlap.
-  const walk = path.length * 280
-  let presentation = 0
-  if (move.captures.length) presentation += walk + STRIKE_MS + move.captures.length * 6500
-  if (move.finishes) presentation += walk + HELICOPTER_MS
+  // present: the walk, then whatever the game does on top of it — a rescue
+  // convoy and a helicopter hoist in Ludo, a slide or a climb in Snakes —
+  // and then any coronation.
+  const walk = walkMs(path.length)
+  let presentation = walk + rules.presentationMs(move, strike, walk)
   if (room.variant !== 'teams' && finished !== null && m.ranking.length <= 2) {
     presentation += m.ranking.length === 1 ? FIRST_CORONATION_MS : SECOND_CORONATION_MS
     m.coronationUntil = Date.now() + presentation
   }
   m.deadline += presentation
-  return { tokenId, path, captures: move.captures, weapon: strike, finished, ended: false }
+  return { tokenId, path, ride, captures: move.captures, weapon: strike, finished, ended: false }
 }
 
-function rangeInclusive(from: number, to: number): number[] {
-  const out: number[] = []
-  for (let p = from; p <= to; p++) out.push(p)
-  return out
+/**
+ * How long the seat on turn gets. A bot only needs long enough to read as
+ * thinking; a person gets the full clock.
+ */
+function turnClock(room: Room) {
+  return isBotSeat(room, room.match?.current ?? null) ? BOT_THINK_MS : TURN_MS
 }
 
-function advance(m: MatchState) {
+function advance(room: Room) {
+  const m = room.match!
   const pos = m.seats.indexOf(m.current)
   let next = m.current
   for (let i = 1; i <= m.seats.length; i++) {
@@ -445,7 +537,7 @@ function advance(m: MatchState) {
   m.moves = []
   m.consecutiveSixes = 0
   m.phase = 'await-roll'
-  m.deadline = Date.now() + TURN_MS
+  m.deadline = Date.now() + turnClock(room)
 }
 
 export function eliminateSeat(room: Room, seat: Seat) {
@@ -460,14 +552,14 @@ export function eliminateSeat(room: Room, seat: Seat) {
   const remaining = surviving.filter(candidate => !m.ranking.includes(candidate))
   const teams = [surviving.filter(candidate => candidate % 2 === 0), surviving.filter(candidate => candidate % 2 === 1)]
   const winnerTeam = room.variant === 'teams' ? teams.find((team, index) => team.length > 0 &&
-    (teams[1 - index].length === 0 || team.every(member => hasWon(m.tokens, member)))) : undefined
+    (teams[1 - index].length === 0 || team.every(member => rulesFor(room.game).hasWon(m.tokens, member)))) : undefined
   if (winnerTeam || (room.variant !== 'teams' && remaining.length <= 1)) {
     m.ranking = winnerTeam ?? [...m.ranking, ...remaining]
     m.phase = 'ended'
     m.die = null
     m.moves = []
     room.phase = 'finished'
-  } else if (m.current === seat) advance(m)
+  } else if (m.current === seat) advance(room)
   return true
 }
 
@@ -501,8 +593,11 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
     code: room.code,
     hostId: room.hostId,
     publicTable: room.publicTable,
+    game: room.game,
     entry: room.entry,
-    prize: room.match ? room.prize : room.entry * room.members.filter(member => member.seat !== null).length,
+    size: room.size,
+    fillBy: room.fillBy,
+    prize: room.match ? room.prize : room.entry * humansOf(room).filter(member => member.seat !== null).length,
     variant: room.variant,
     phase: room.phase,
     members: room.members.map((m) => ({
@@ -511,6 +606,7 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
       seat: m.seat,
       ready: m.ready,
       connected: m.connected,
+      ...(m.bot ? { bot: true as const } : {}),
       ...(includeCharacters && m.character ? { character: m.character } : {}),
     })),
     match: room.match
@@ -545,7 +641,7 @@ export function sweepIdleRooms() {
   const now = Date.now()
   const removed: Room[] = []
   for (const [code, room] of rooms) {
-    const anyone = room.members.some((m) => m.connected)
+    const anyone = room.members.some((m) => m.connected && !m.bot)
     if (!anyone && now - room.lastActivity > ROOM_TTL_MS) {
       rooms.delete(code)
       removed.push(room)

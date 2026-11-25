@@ -11,6 +11,8 @@ import { fitPortrait } from './fitPortrait.js'
 import { serveMetaPerson } from './metaperson.js'
 import { attachVoice, serveVoice } from './voice.js'
 import type { Seat } from './rules.js'
+import { randomWeapon } from './weapons.js'
+import { readGame } from './games.js'
 import {
   allRooms,
   activeRoomFor,
@@ -21,12 +23,16 @@ import {
   doMove,
   doRoll,
   eliminateSeat,
+  fillWithBots,
   getRoom,
+  humansOf,
+  isBotSeat,
   joinRoom,
   leaveRoom,
   markDisconnected,
   missRoll,
   readCharacter,
+  readTableKind,
   roomOfSocket,
   setReady,
   setRoomVariant,
@@ -35,6 +41,7 @@ import {
   sweepIdleRooms,
   TURN_MS,
   MATCH_INTRO_MS,
+  PUBLIC_FILL_MS,
   type Room,
 } from './room.js'
 
@@ -90,6 +97,8 @@ attachVoice(io)
 
 const POT_LEASE_MS = 5 * 60_000
 const startingRooms = new WeakSet<Room>()
+/** How long a match of bots keeps going after its last player drops off. */
+const ABANDONED_MS = 45_000
 type FundedRoom = { pot: MatchPot; seats: Map<Seat, string>; winners?: string[]; settling?: boolean }
 const fundedRooms = new Map<Room, FundedRoom>()
 
@@ -171,12 +180,12 @@ function performRoll(room: Room, seat: Seat, manual = true) {
     passed: result.passed,
   })
   publish(room)
-  if (!room.publicTable && result.moves.length === 1 && room.match) {
+  if (result.moves.length === 1 && room.match) {
     const match = room.match
     const moves = result.moves
     setTimeout(() => {
       if (room.match === match && match.phase === 'await-move' && match.moves === moves) {
-        performMove(room, seat, moves[0].tokenId)
+        performMove(room, seat, moves[0].tokenId, isBotSeat(room, seat) ? randomWeapon() : undefined)
       }
     }, FORCED_MOVE_DELAY_MS).unref()
   }
@@ -192,6 +201,7 @@ function performMove(room: Room, seat: Seat, tokenId: string, weapon?: unknown) 
     seat,
     tokenId: result.tokenId,
     path: result.path,
+    ride: result.ride ?? null,
     captures: result.captures,
     weapon: result.weapon,
     snapshot: snapshot(room),
@@ -213,6 +223,52 @@ function settleResults(room: Room) {
   if (ended) {
     trackMatchEnd(room, 'completed')
     io.to(room.code).emit('match:ended', { ranking })
+  }
+}
+
+/**
+ * Hold the entry coins and start the match. The host's Start button and a
+ * public table starting itself both come through here, so the pot is funded
+ * exactly once either way. Returns an error to show, or null on success.
+ */
+async function launchMatch(room: Room, byPlayerId: string | null): Promise<string | null> {
+  if (startingRooms.has(room)) return 'This match is starting.'
+  const blocked = canStart(room)
+  if (blocked) return blocked
+  if (fundedRooms.has(room)) return 'The earlier entry refund is processing. Try again.'
+  startingRooms.add(room)
+  try {
+    if (room.entry) {
+      // Bots hold no account, so they are not in the pot and never pay in.
+      const seats = new Map(room.members.flatMap(member =>
+        member.seat === null || member.bot ? [] : [[member.seat, member.playerId] as const]))
+      const pot = { id: randomUUID(), entry: room.entry, accounts: [...seats.values()], expiresAt: Date.now() + POT_LEASE_MS }
+      try {
+        const store = await accountStore()
+        const balances = await store.fundMatchPot(pot)
+        fundedRooms.set(room, { pot, seats })
+        const paying = room.members.filter(member => member.seat !== null && !member.bot)
+        const sameSeats = paying.every(member => seats.get(member.seat!) === member.playerId) && paying.length === seats.size
+        if (!sameSeats || (byPlayerId !== null && room.hostId !== byPlayerId) || canStart(room)) {
+          void settlePot(room, [])
+          return 'The room changed before the match started. Try again.'
+        }
+        for (const { id, coins } of balances) io.to(`wallet:${id}`).emit('wallet:changed', { accountId: id, coins })
+      } catch (error) {
+        if (error instanceof InsufficientMatchCoins) {
+          const player = room.members.find(member => member.playerId === error.accountId)
+          return `${player?.name ?? 'A player'} needs more online coins for this table.`
+        }
+        return 'Could not reserve the entry coins. Try again.'
+      }
+    }
+    startMatch(room, Date.now() + 750 + MATCH_INTRO_MS)
+    trackMatchStart(room, fundedRooms.get(room)?.pot.id)
+    io.to(room.code).emit('match:started', snapshot(room, true))
+    publish(room)
+    return null
+  } finally {
+    startingRooms.delete(room)
   }
 }
 
@@ -260,17 +316,21 @@ io.on('connection', (socket) => {
     if (typeof ack === 'function') ack({ ok: true, serverNow: Date.now() })
   })
 
-  socket.on('room:create', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
+  socket.on('room:create', async (payload: { character?: unknown; entry?: unknown; game?: unknown },
+    ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
     if (hasOtherLiveMatch(socket)) return ack?.({ ok: false, error: liveMatchMessage })
 
     const entry = readMatchEntry(payload?.entry)
     if (entry === undefined) return ack?.({ ok: false, error: 'Choose a listed coin entry.' })
+    const game = readGame(payload?.game ?? 'ludo')
+    if (!game) return ack?.({ ok: false, error: 'Unknown game.' })
     const blocked = await checkEntry(me.playerId, entry)
     if (blocked) return ack?.({ ok: false, error: blocked })
     if (!socket.connected || roomOfSocket(socket.id)) return ack?.({ ok: false, error: 'Leave your current room first.' })
-    const room = createRoom(me.playerId, me.name, false, readCharacter(payload?.character), entry)
+    const room = createRoom(me.playerId, me.name, false, readCharacter(payload?.character), entry,
+      { size: 4, variant: 'classic' }, game)
     bindSocket(room, me.playerId, socket.id)
     socket.join(room.code)
     ack?.({ ok: true, snapshot: snapshot(room) })
@@ -278,20 +338,27 @@ io.on('connection', (socket) => {
     trackActivity({ kind: 'room.created', accountId: me.playerId, name: me.name, detail: 'Friends · ' + room.code })
   })
 
-  socket.on('room:quick', async (payload: { character?: unknown; entry?: unknown }, ack?: (r: unknown) => void) => {
+  socket.on('room:quick', async (payload: { character?: unknown; entry?: unknown; table?: unknown; game?: unknown },
+    ack?: (r: unknown) => void) => {
     const me = identityOf(socket)
     if (!me) return ack?.({ ok: false, error: 'Identify first' })
     if (hasOtherLiveMatch(socket)) return ack?.({ ok: false, error: liveMatchMessage })
     const entry = readMatchEntry(payload?.entry)
     if (entry === undefined) return ack?.({ ok: false, error: 'Choose a listed coin entry.' })
+    const table = readTableKind(payload?.table)
+    if (!table) return ack?.({ ok: false, error: 'Choose a listed table.' })
+    const game = readGame(payload?.game ?? 'ludo')
+    if (!game) return ack?.({ ok: false, error: 'Unknown game.' })
     const blocked = await checkEntry(me.playerId, entry)
     if (blocked) return ack?.({ ok: false, error: blocked })
     if (!socket.connected) return
     const current = roomOfSocket(socket.id)
     if (current) return ack?.({ ok: true, snapshot: snapshot(current) })
+    // Only ever paired with people who asked for the same game, table and stake.
     const open = allRooms().find(room => room.publicTable && room.entry === entry && room.phase === 'lobby' &&
-      room.members.length < 4 && !startingRooms.has(room))
-    const room = open ?? createRoom(me.playerId, me.name, true, undefined, entry)
+      room.game === game && room.size === table.size && room.variant === table.variant &&
+      room.members.length < room.size && !startingRooms.has(room))
+    const room = open ?? createRoom(me.playerId, me.name, true, undefined, entry, table, game)
     const joined = joinRoom(room.code, me.playerId, me.name, socket.id, readCharacter(payload?.character))
     if (!joined.ok) return ack?.({ ok: false, error: joined.error })
     socket.join(room.code)
@@ -362,42 +429,8 @@ io.on('connection', (socket) => {
     const room = roomOfSocket(socket.id)
     if (!me || !room) return ack?.({ ok: false, error: 'Not in a room' })
     if (room.hostId !== me.playerId) return ack?.({ ok: false, error: 'Only the host can start' })
-    if (startingRooms.has(room)) return ack?.({ ok: false, error: 'This match is starting.' })
-
-    const blocked = canStart(room)
-    if (blocked) return ack?.({ ok: false, error: blocked })
-    if (fundedRooms.has(room)) return ack?.({ ok: false, error: 'The earlier entry refund is processing. Try again.' })
-    if (room.entry) {
-      const seats = new Map(room.members.flatMap(member => member.seat === null ? [] : [[member.seat, member.playerId] as const]))
-      const pot = { id: randomUUID(), entry: room.entry, accounts: [...seats.values()], expiresAt: Date.now() + POT_LEASE_MS }
-      startingRooms.add(room)
-      try {
-        const store = await accountStore()
-        const balances = await store.fundMatchPot(pot)
-        fundedRooms.set(room, { pot, seats })
-        const sameSeats = room.members.every(member => member.seat === null || seats.get(member.seat) === member.playerId) &&
-          room.members.filter(member => member.seat !== null).length === seats.size
-        if (!sameSeats || room.hostId !== me.playerId || canStart(room)) {
-          void settlePot(room, [])
-          return ack?.({ ok: false, error: 'The room changed before the match started. Try again.' })
-        }
-        for (const { id, coins } of balances) io.to(`wallet:${id}`).emit('wallet:changed', { accountId: id, coins })
-      } catch (error) {
-        if (error instanceof InsufficientMatchCoins) {
-          const player = room.members.find(member => member.playerId === error.accountId)
-          return ack?.({ ok: false, error: `${player?.name ?? 'A player'} needs more online coins for this table.` })
-        }
-        return ack?.({ ok: false, error: 'Could not reserve the entry coins. Try again.' })
-      } finally {
-        startingRooms.delete(room)
-      }
-    }
-
-    startMatch(room, Date.now() + 750 + MATCH_INTRO_MS)
-    trackMatchStart(room, fundedRooms.get(room)?.pot.id)
-    ack?.({ ok: true })
-    io.to(room.code).emit('match:started', snapshot(room, true))
-    publish(room)
+    const error = await launchMatch(room, me.playerId)
+    ack?.(error ? { ok: false, error } : { ok: true })
   })
 
   socket.on('room:leave', () => {
@@ -508,17 +541,39 @@ setInterval(() => {
   const now = Date.now()
   for (const room of roomsNeedingAttention(now)) {
     const m = room.match!
+    const seat = m.current
+    // A bot is on the same clock as everyone else, only a much shorter one.
+    // It never misses a roll, because it is never away.
+    const bot = isBotSeat(room, seat)
     if (m.phase === 'await-roll') {
-      const seat = m.current
-      if (missRoll(room)) {
+      if (bot) performRoll(room, seat, false)
+      else if (missRoll(room)) {
         trackMatchActivity(room, seat, 'match.eliminated', 'Five missed dice rolls')
         settleResults(room)
         publish(room)
       } else performRoll(room, seat, false)
     } else if (m.phase === 'await-move') {
       const tokenId = autoPick(room)
-      if (tokenId) performMove(room, m.current, tokenId)
+      if (tokenId) performMove(room, seat, tokenId, bot ? randomWeapon() : undefined)
     }
+  }
+  for (const room of openPublicTables(now)) {
+    // A public table runs itself: it plays the moment it is full, and once the
+    // fill window closes it sits bots in whatever seats are left rather than
+    // leaving people waiting on strangers who may never come.
+    if (room.members.length < room.size) fillWithBots(room)
+    if (!humansOf(room).some(member => member.connected)) continue
+    void launchMatch(room, null).then(error => {
+      if (!error) return
+      // Give it another window rather than hammering the pot every second.
+      room.fillBy = Date.now() + PUBLIC_FILL_MS
+      publish(room)
+    })
+  }
+  for (const room of abandonedTables(now)) {
+    trackMatchEnd(room, 'abandoned')
+    void settlePot(room, [])
+    room.phase = 'finished'
   }
   for (const room of sweepIdleRooms()) if (room.phase !== 'finished') {
     trackMatchEnd(room, 'abandoned')
@@ -550,6 +605,21 @@ function roomsNeedingAttention(now: number): Room[] {
     const m = room.match
     return !!m && room.phase === 'playing' && m.phase !== 'ended' && now >= m.deadline
   })
+}
+
+/** Public tables that are full, or have waited long enough to stop waiting. */
+function openPublicTables(now: number): Room[] {
+  return allRooms().filter(room => room.publicTable && room.phase === 'lobby' && !startingRooms.has(room)
+    && (room.members.length >= room.size || now >= room.fillBy))
+}
+
+/**
+ * Matches whose last real player has been gone a while. Without this the bots
+ * would happily play on by themselves and the room would never be swept.
+ */
+function abandonedTables(now: number): Room[] {
+  return allRooms().filter(room => room.phase === 'playing' && room.members.some(member => member.bot)
+    && !humansOf(room).some(member => member.connected) && now - room.lastActivity > ABANDONED_MS)
 }
 
 http.listen({ port:PORT, host:process.env.LUDO_BIND_HOST }, () => {

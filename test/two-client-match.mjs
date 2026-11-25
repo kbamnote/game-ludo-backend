@@ -28,20 +28,51 @@ log('room created:', code)
 
 const quick = await connect('Quick')
 const guest = await connect('Guest')
+const solo = await connect('Solo')
 try {
-  const first = await call(quick, 'room:quick')
-  const second = await call(guest, 'room:quick')
+  const first = await call(quick, 'room:quick', { table: 'duel' })
+  const second = await call(guest, 'room:quick', { table: 'duel' })
   assert.equal(first.ok, true)
   assert.equal(second.ok, true)
   assert.notEqual(first.snapshot.code, code)
   assert.equal(second.snapshot.code, first.snapshot.code)
   assert.equal(second.snapshot.members.length, 2)
-  const repeat = await call(guest, 'room:quick')
+  assert.equal(second.snapshot.size, 2)
+  // Two at a table face each other.
+  assert.deepEqual(second.snapshot.members.map((m) => m.seat), [0, 2])
+  const repeat = await call(guest, 'room:quick', { table: 'duel' })
   assert.equal(repeat.snapshot.members.length, 2)
   log('public players paired in a separate room')
+
+  // Someone asking for a different table is never dealt into this one.
+  const apart = await call(solo, 'room:quick', { table: 'teams' })
+  assert.equal(apart.ok, true)
+  assert.notEqual(apart.snapshot.code, first.snapshot.code)
+  assert.equal(apart.snapshot.size, 4)
+  assert.equal(apart.snapshot.variant, 'teams')
+  log('a different table is a different room')
+
+  // Nobody taps ready and nobody taps start: a full public table plays itself.
+  const playing = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('The full public table did not start itself')), 6000)
+    quick.on('match:started', snapshot => { clearTimeout(timeout); resolve(snapshot) })
+  })
+  assert.equal(playing.phase, 'playing')
+  assert.equal(playing.members.length, 2)
+  log('full public table started itself')
+
+  // The one-player Team Up table waits, then sits bots in the empty seats.
+  const filled = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('The waiting table never filled with bots')), 25000)
+    solo.on('match:started', snapshot => { clearTimeout(timeout); resolve(snapshot) })
+  })
+  assert.equal(filled.members.length, 4)
+  assert.equal(filled.members.filter((m) => m.bot).length, 3)
+  log('bots filled the empty seats and the match began')
 } finally {
   quick.close()
   guest.close()
+  solo.close()
 }
 
 const joined = await call(b, 'room:join', { code, character: { model: 1, face: 'invalid texture' } })
