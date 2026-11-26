@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
+import { randomUUID } from 'node:crypto'
+import { on, once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { io } from 'socket.io-client'
 
@@ -14,6 +15,18 @@ async function connect(namespace = '/voice') {
 const enter = (s, options) => s.timeout(3000).emitWithAck('enter', { name: 'Tester', ...options })
 const call = (s, event, payload) => s.timeout(3000).emitWithAck(event, payload)
 const frame = Buffer.alloc(960, 23)
+async function waitForReady(socket, name) {
+  for await (const [snapshot] of on(socket, 'room:state', { signal: AbortSignal.timeout(5000) })) {
+    if (snapshot.members.some(member => member.name === name && member.ready)) return
+  }
+}
+async function waitForUnmute(socket) {
+  for await (const [members] of on(socket, 'roster', { signal: AbortSignal.timeout(5000) })) {
+    if (members.some(member => member.id === socket.id && !member.muted)) return
+  }
+}
+
+let step = 'lounge'
 try {
   const [host, guest, outside, third, fourth] = await Promise.all(Array.from({ length: 5 }, connect))
   const room = await enter(host, { create: true })
@@ -54,35 +67,62 @@ try {
   assert.ok((await enter(host, { code })).error, 'empty rooms expire')
   console.log('Voice passed: room capacity, membership, binary audio, mute, isolation and cleanup.')
 
+  step = 'Friends room creation'
   const [gameHost, gameGuest, listener] = await Promise.all([connect('/'), connect('/'), connect('/')])
-  await call(gameHost, 'identify', { playerId:'voice-host', name:'Host' })
-  await call(gameGuest, 'identify', { playerId:'voice-guest', name:'Guest' })
+  const guestId = randomUUID()
+  assert.equal((await call(gameHost, 'identify', { playerId:randomUUID(), name:'Voice Test Host' })).ok, true)
+  assert.equal((await call(gameGuest, 'identify', { playerId:guestId, name:'Voice Test Guest' })).ok, true)
   assert.equal((await call(listener, 'match:voice', {})).ok, false)
   const created = await call(gameHost, 'room:create', {})
+  assert.equal(created.ok, true, created.error)
   const matchCode = created.snapshot.code
   assert.equal((await call(gameHost, 'match:voice', {})).ok, false, 'voice opens once the match starts')
   assert.equal((await call(gameGuest, 'room:join', { code:matchCode })).ok, true)
+  step = 'Friends guest ready and start'
+  const ready = waitForReady(gameHost, 'Voice Test Guest')
   gameGuest.emit('room:ready', { ready:true })
-  await once(gameHost, 'room:state', { signal:AbortSignal.timeout(3000) })
+  await ready
   assert.equal((await call(gameHost, 'room:start', {})).ok, true)
-  const hostTicket = (await call(gameHost, 'match:voice', {})).ticket
-  const guestTicket = (await call(gameGuest, 'match:voice', {})).ticket
+  step = 'Friends voice admission'
+  const payload = { code: matchCode }
+  const reconnectedGuest = await connect('/')
+  gameGuest.disconnect()
+  assert.equal((await call(reconnectedGuest, 'identify', { playerId:guestId, name:'Voice Test Guest' })).ok, true)
+  assert.equal((await call(reconnectedGuest, 'match:voice', payload)).ok, false, 'identifying alone does not restore voice')
+  assert.equal((await call(reconnectedGuest, 'room:join', payload)).snapshot.phase, 'playing')
+  const hostTicket = (await call(gameHost, 'match:voice', payload)).ticket
+  const guestTicket = (await call(reconnectedGuest, 'match:voice', payload)).ticket
   const [hostMic, guestMic, outsiderMic] = await Promise.all([connect(), connect(), connect()])
   assert.ok((await call(outsiderMic, 'enterMatch', matchCode)).error)
   const hosted = await call(hostMic, 'enterMatch', hostTicket)
   assert.equal(hosted.members[0].muted, true)
+  assert.equal(hosted.members[0].seat, 0)
+  assert.match(hosted.matchId, /^\d{6}:\d+$/)
   assert.ok((await call(outsiderMic, 'enterMatch', hostTicket)).error, 'tickets cannot be replayed')
-  assert.equal((await call(guestMic, 'enterMatch', guestTicket)).members.length, 2)
+  const joinedVoice = await call(guestMic, 'enterMatch', guestTicket)
+  assert.equal(joinedVoice.matchId, hosted.matchId)
+  assert.deepEqual(joinedVoice.members.map(member => member.seat), [0, 2])
   for (const [sender, receiver] of [[hostMic, guestMic], [guestMic, hostMic]]) {
+    step = sender === hostMic ? 'host-to-guest audio' : 'guest-to-host audio'
+    const unmuted = waitForUnmute(sender)
     sender.emit('mute', false)
-    const delivered = once(receiver, 'audio', { signal:AbortSignal.timeout(3000) })
-    sender.emit('audio', frame)
-    assert.deepEqual(await delivered, [sender.id, frame])
+    await unmuted
+    const delivered = once(receiver, 'audio', { signal:AbortSignal.timeout(5000) })
+    const senderFrames = setInterval(() => sender.volatile.emit('audio', frame), 20)
+    try {
+      assert.deepEqual(await delivered, [sender.id, frame])
+    } finally {
+      clearInterval(senderFrames)
+    }
   }
+  step = 'voice disconnect on game room leave'
   const stopped = once(guestMic, 'disconnect', { signal:AbortSignal.timeout(3000) })
-  gameGuest.emit('room:leave')
+  reconnectedGuest.emit('room:leave')
   await stopped
   console.log('Friends match passed: seats only, starts muted, single-use admission, two-way audio and voice closes on leave.')
+} catch (error) {
+  console.error('Voice test failed during ' + step)
+  throw error
 } finally {
   clients.forEach((client) => client.disconnect())
 }

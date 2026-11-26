@@ -29,7 +29,7 @@ export function serveVoice(path: string, res: ServerResponse) {
 
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const frameBytes = 960 // 20 ms of mono signed 16-bit PCM at 24 kHz
-type Member = { id: string; name: string; muted: boolean }
+type Member = { id: string; name: string; muted: boolean; seat?: number }
 type Lounge = Map<string, Member>
 
 export function attachVoice(io: Server) {
@@ -41,7 +41,9 @@ export function attachVoice(io: Server) {
   const friendsRoom = (id: string) => {
     const room = roomOfSocket(id)
     const member = room?.members.find(member => member.socketId === id && member.connected && member.seat !== null)
-    return room?.phase === 'playing' && !room.publicTable && member ? { room, member } : undefined
+    const seat = member?.seat
+    return room?.phase === 'playing' && !room.publicTable && room.match && member && seat != null
+      ? { room, member, seat, opensAt: room.match.opensAt } : undefined
   }
   io.on('connection', socket => {
     let ticket: string | undefined
@@ -54,10 +56,12 @@ export function attachVoice(io: Server) {
     socket.on('room:leave', exitVoice)
     socket.on('room:suspend', exitVoice)
     socket.on('disconnect', exitVoice)
-    socket.on('match:voice', (_request, reply) => {
+    socket.on('match:voice', (request, reply) => {
       if (typeof reply !== 'function') return
       const match = friendsRoom(socket.id)
-      if (!match) return reply({ ok: false, error: 'Join a Friends match to use its voice chat.' })
+      if (!match || (request?.code !== undefined && request.code !== match.room.code)) {
+        return reply({ ok: false, code: 'VOICE_SEAT_REQUIRED', error: 'Join a Friends match to use its voice chat.' })
+      }
       clearTicket()
       ticket = randomBytes(24).toString('base64url')
       tickets.set(ticket, { socketId: socket.id, roomCode: match.room.code })
@@ -85,11 +89,12 @@ export function attachVoice(io: Server) {
       else roster()
       code = ''
     }
-    function join(key: string, room: Lounge, name: string, reply: (result: unknown) => void) {
+    function join(key: string, room: Lounge, name: string, reply: (result: unknown) => void,
+      match?: { seat: number; id: string }) {
       code = key
-      room.set(socket.id, { id: socket.id, name, muted: true })
+      room.set(socket.id, { id: socket.id, name, muted: true, ...(match && { seat: match.seat }) })
       void socket.join(code)
-      reply({ code, members: [...room.values()] })
+      reply({ code, members: [...room.values()], ...(match && { matchId: match.id }) })
       roster()
     }
     socket.on('enterMatch', (ticket, reply) => {
@@ -109,7 +114,10 @@ export function attachVoice(io: Server) {
       const key = 'match:' + grant.roomCode
       const room = rooms.get(key) ?? new Map()
       rooms.set(key, room)
-      join(key, room, match.member.name, reply)
+      join(key, room, match.member.name, reply, {
+        seat: match.seat,
+        id: grant.roomCode + ':' + match.opensAt,
+      })
     })
     socket.on('enter', (request, reply) => {
       if (typeof reply !== 'function') return

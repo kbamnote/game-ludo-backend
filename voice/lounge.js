@@ -25,6 +25,11 @@ let capture = null
 let micRequest = 0
 let micStartupTimer
 const playAt = new Map()
+const playerOutputs = new Map()
+const playerSeats = new Map()
+const mutedSeats = new Set()
+const muteStorageKey = 'friends-voice-muted-players'
+let matchId = ''
 
 // The app and the web preview both embed this page; report status to whichever
 // is hosting it so the failure is readable outside the lounge's own panel.
@@ -79,6 +84,10 @@ function leave(message = '') {
     speaker = null
   }
   playAt.clear()
+  playerOutputs.clear()
+  playerSeats.clear()
+  mutedSeats.clear()
+  matchId = ''
   el('setup').hidden = Boolean(matchTicket)
   el('matchSetup').hidden = !matchTicket || autoJoinMatch
   el('lounge').hidden = true
@@ -88,7 +97,45 @@ function leave(message = '') {
 
 function roster(members) {
   const ids = new Set(members.map((member) => member.id))
+  for (const id of playerOutputs.keys()) if (!ids.has(id)) clearPlayerAudio(id)
   for (const id of playAt.keys()) if (!ids.has(id)) playAt.delete(id)
+  if (matchTicket) {
+    const peers = members.filter(member => member.id !== socket?.id && Number.isInteger(member.seat)
+      && member.seat >= 0 && member.seat <= 3)
+    playerSeats.clear()
+    for (const member of peers) playerSeats.set(member.id, member.seat)
+    el('playerAudio').hidden = peers.length === 0
+    el('playerAudioList').replaceChildren(...peers.map(member => {
+      const row = document.createElement('li')
+      const name = document.createElement('span')
+      name.textContent = 'P' + (member.seat + 1) + ' · ' + member.name
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'secondary'
+      button.setAttribute('aria-label', 'Mute voice for ' + name.textContent)
+      const update = () => {
+        const muted = mutedSeats.has(member.seat)
+        button.textContent = muted ? 'Unmute' : 'Mute'
+        button.setAttribute('aria-pressed', String(muted))
+      }
+      button.onclick = () => {
+        if (mutedSeats.has(member.seat)) mutedSeats.delete(member.seat)
+        else {
+          mutedSeats.add(member.seat)
+          for (const [id, seat] of playerSeats) if (seat === member.seat) clearPlayerAudio(id)
+        }
+        if (matchId) {
+          try { localStorage.setItem(muteStorageKey, JSON.stringify({ matchId, seats: [...mutedSeats] })) }
+          catch { /* The setting still applies to this connection. */ }
+        }
+        update()
+      }
+      update()
+      row.append(name, button)
+      return row
+    }))
+    return
+  }
   el('members').replaceChildren(...members.map((member) => {
     const li = document.createElement('li')
     const state = document.createElement('span')
@@ -98,8 +145,15 @@ function roster(members) {
   }))
 }
 
+function clearPlayerAudio(id) {
+  playerOutputs.get(id)?.disconnect()
+  playerOutputs.delete(id)
+  playAt.delete(id)
+}
+
 function play(id, frame) {
   if (!roomCode || !speaker || speakerMuted || context?.state !== 'running' || !(frame instanceof ArrayBuffer) || frame.byteLength !== 960) return
+  if (mutedSeats.has(playerSeats.get(id))) return
   const now = context.currentTime
   const next = playAt.get(id) || 0
   // Drop backed-up packets instead of letting a slow connection delay the conversation.
@@ -111,10 +165,25 @@ function play(id, frame) {
   for (let i = 0; i < pcm.length; i++) output[i] = pcm[i] / 32768
   const source = context.createBufferSource()
   source.buffer = buffer
-  source.connect(speaker)
+  let destination = speaker
+  if (matchTicket) {
+    destination = playerOutputs.get(id)
+    if (!destination) {
+      destination = context.createGain()
+      destination.connect(speaker)
+      playerOutputs.set(id, destination)
+    }
+  }
+  source.connect(destination)
   source.onended = () => source.disconnect()
   source.start(start)
   playAt.set(id, start + buffer.duration)
+}
+
+function startPendingMicrophone() {
+  if (!startMatchMic || !roomCode || document.hidden || context?.state !== 'running') return false
+  void toggleMic()
+  return true
 }
 
 function enter(create) {
@@ -129,6 +198,11 @@ function enter(create) {
     speaker.connect(context.destination)
     const updatePlayback = () => {
       el('resume').hidden = context?.state === 'running'
+      if (!roomCode || context?.state !== 'running') return
+      if (startPendingMicrophone()) return
+      if (el('status').textContent === 'Tap Resume sound to start voice audio.') {
+        notice(stream ? 'Your microphone is live.' : 'Listening to match voice.')
+      }
     }
     context.onstatechange = updatePlayback
     updatePlayback()
@@ -151,6 +225,15 @@ function enter(create) {
       if (session !== socket) return
       if (error || !reply?.code) return leave(reply?.error || 'The voice server did not respond.')
       roomCode = reply.code
+      if (matchTicket && typeof reply.matchId === 'string') {
+        matchId = reply.matchId
+        try {
+          const saved = JSON.parse(localStorage.getItem(muteStorageKey))
+          if (saved?.matchId === matchId && Array.isArray(saved.seats)) {
+            for (const seat of saved.seats) if (Number.isInteger(seat) && seat >= 0 && seat <= 3) mutedSeats.add(seat)
+          }
+        } catch { /* Voice works when storage is unavailable. */ }
+      }
       codeField.value = roomCode
       el('roomCode').textContent = roomCode
       el('setup').hidden = true
@@ -158,10 +241,7 @@ function enter(create) {
       el('lounge').hidden = false
       roster(reply.members)
       el('mic').hidden = autoJoinMatch && !autoStartMic
-      if (startMatchMic && !document.hidden && context.state === 'running') {
-        notice('Starting microphone…')
-        void toggleMic()
-      } else {
+      if (!startPendingMicrophone()) {
         notice(context.state !== 'running' ? 'Tap Resume sound to start voice audio.'
           : autoJoinMatch ? 'Listening to match voice.' : 'Microphone muted. Unmute when you want to speak.')
       }
@@ -183,8 +263,9 @@ window.addEventListener('message', (event) => {
 })
 
 async function toggleMic() {
-  if (stream) { stopMic(); return notice('Microphone muted.') }
   if (!socket?.connected || !roomCode || !context) return
+  startMatchMic = false
+  if (stream) { stopMic(); return notice('Microphone muted.') }
   const request = ++micRequest
   const audio = context
   el('mic').disabled = true
@@ -249,7 +330,9 @@ el('resume').onclick = () => {
     return
   }
   void audio.resume().then(() => {
-    if (context === audio && roomCode) notice(stream ? 'Your microphone is live.' : 'Listening to match voice.')
+    if (context === audio && roomCode && !el('mic').disabled) {
+      notice(stream ? 'Your microphone is live.' : 'Listening to match voice.')
+    }
   }, () => notice('Sound is paused by your device.'))
 }
 el('invite').onclick = async () => {

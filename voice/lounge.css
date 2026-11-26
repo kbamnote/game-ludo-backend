@@ -16,4 +16,8 @@ li:last-child{border:0}li span{color:#b2c6e0;font-size:14px}.wave{display:flex;g
 .match-chat #lounge .panel,.match-chat #leave{display:none}
 .match-chat button{min-height:36px;padding:5px 10px}
 .match-chat #status{margin-top:4px}
+#playerAudio summary{cursor:pointer;padding:8px 10px;background:#213e69;color:#ffe5a3;border:1px solid #4a6590;border-radius:8px;font-weight:750}
+#playerAudio li{align-items:center;padding:4px 0}
+#playerAudio li span{min-width:0;overflow-wrap:anywhere;color:#eef4ff}
+#playerAudio li button{flex:none;width:auto;padding-inline:12px}
 .wave i{width:7px;height:13px;border-radius:5px;background:#ffd872}.wave i:nth-child(even){height:28px}.wave i:nth-child(3){height:41px}

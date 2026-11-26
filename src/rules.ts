@@ -163,8 +163,7 @@ function tokensOnSameCell(tokens: Token[], seat: Seat, progress: number): Token[
 
 /**
  * Every legal move for `seat` with `die`.
- * A cell holding two or more tokens of one colour is a blockade: no opposing
- * token may land on it, and captures there do not happen.
+ * Landing on an unprotected cell captures every opposing token on it.
  */
 export function legalMoves(tokens: Token[], seat: Seat, die: number, teams = false): Move[] {
   const moves: Move[] = []
@@ -185,7 +184,7 @@ export function legalMoves(tokens: Token[], seat: Seat, die: number, teams = fal
       if (to > HOME_STEP) continue // must land on home exactly
     }
 
-    // Home column and home itself are private: no blockades, no captures.
+    // The home column and home itself are private.
     if (to > LAST_TRACK_STEP) {
       moves.push({ tokenId: token.id, from: token.progress, to, captures: [], finishes: to === HOME_STEP, entersBoard })
       continue
@@ -197,8 +196,6 @@ export function legalMoves(tokens: Token[], seat: Seat, die: number, teams = fal
     )
 
     const enemies = occupants.filter((t) => t.seat !== seat && (!teams || t.seat % 2 !== seat % 2))
-    const enemyBlockade = enemies.length >= 2 && enemies.every((t) => t.seat === enemies[0].seat)
-    if (enemyBlockade) continue // cannot pass through or land on a blockade
 
     const captures = SAFE_CELLS.has(landingIdx) ? [] : enemies.map((t) => t.id)
 

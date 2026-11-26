@@ -40,6 +40,7 @@ import {
   startMatch,
   sweepIdleRooms,
   TURN_MS,
+  FRIENDS_INTRO_MS,
   MATCH_INTRO_MS,
   PUBLIC_FILL_MS,
   type Room,
@@ -262,7 +263,8 @@ async function launchMatch(room: Room, byPlayerId: string | null): Promise<strin
         return 'Could not reserve the entry coins. Try again.'
       }
     }
-    startMatch(room, Date.now() + 750 + MATCH_INTRO_MS)
+    const introMs = room.publicTable ? MATCH_INTRO_MS : FRIENDS_INTRO_MS
+    startMatch(room, Date.now() + 750 + introMs, introMs)
     trackMatchStart(room, fundedRooms.get(room)?.pot.id)
     io.to(room.code).emit('match:started', snapshot(room, true))
     publish(room)

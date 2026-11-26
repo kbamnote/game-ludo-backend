@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { activeRoomFor, canStart, createRoom, doMove, doRoll, eliminateSeat, joinRoom, leaveRoom, markDisconnected, missRoll, setReady, setRoomVariant, snapshot, startMatch } from '../dist/room.js'
-import { HOME_STEP, createTokens, legalMoves } from '../dist/rules.js'
+import { HOME_STEP, YARD, createTokens, legalMoves } from '../dist/rules.js'
 import { TURN_MS } from '../dist/room.js'
 
 function roomWith(players, variant = 'classic') {
@@ -123,6 +123,28 @@ test('Friends pauses the next turn for the hoist and gold throne shot, and keeps
     assert.match(doRoll(room, match.current).error, /coronation/)
     now++
   }
+})
+
+test('landing on an opposing stack captures both pieces unless the square is safe', t => {
+  const room = roomWith(2)
+  t.mock.method(Math, 'random', () => 0)
+  const match = startMatch(room)
+  const mover = match.tokens.find(token => token.seat === 0)
+  const opponents = match.tokens.filter(token => token.seat === 2).slice(0, 2)
+  mover.progress = 7
+  opponents.forEach(token => { token.progress = 34 })
+  const safeMove = legalMoves(match.tokens, 0, 1).find(move => move.tokenId === mover.id)
+  assert.deepEqual(safeMove?.captures, [])
+
+  mover.progress = 14
+  opponents.forEach(token => { token.progress = 41 })
+  const ids = opponents.map(token => token.id)
+  const roll = doRoll(room, 0)
+  assert.deepEqual(roll.moves?.find(move => move.tokenId === mover.id)?.captures, ids)
+  const moved = doMove(room, 0, mover.id)
+  assert.deepEqual(moved.captures, ids)
+  assert.deepEqual(match.tokens.filter(token => ids.includes(token.id)).map(token => token.progress), [YARD, YARD])
+  assert.equal(match.current, 0, 'the capture earns an extra roll')
 })
 
 test('Team Up allows shared tiles with a partner and needs both partners to finish', t => {

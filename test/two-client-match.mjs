@@ -1,5 +1,6 @@
 import { io } from 'socket.io-client'
 import assert from 'node:assert/strict'
+import { TURN_MS } from '../dist/room.js'
 
 const URL = process.env.URL ?? 'http://localhost:8080'
 const log = (...a) => console.log(...a)
@@ -59,6 +60,7 @@ try {
   })
   assert.equal(playing.phase, 'playing')
   assert.equal(playing.members.length, 2)
+  assert.equal(playing.match.introMs, 9000)
   log('full public table started itself')
 
   // The one-player Team Up table waits, then sits bots in the empty seats.
@@ -100,6 +102,10 @@ if (!started.ok) throw new Error('start failed: ' + started.error)
 log('match started')
 const matchStartSnapshots = await appearances
 for (const match of matchStartSnapshots) {
+  assert.equal(match.match.introMs, 4500)
+  assert.ok(match.match.opensAt - match.serverNow <= 5250)
+  assert.ok(match.match.opensAt - match.serverNow >= 4500)
+  assert.equal(match.match.deadline - match.match.opensAt, TURN_MS)
   assert.deepEqual(match.members[0].character, character)
   assert.equal(match.members[1].character, undefined)
 }

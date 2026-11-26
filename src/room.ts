@@ -19,6 +19,7 @@ export const MAX_SEATS = 4
 /** A seat that stalls this long has its turn played for it. */
 export const TURN_MS = 20_000
 export const MATCH_INTRO_MS = 9000
+export const FRIENDS_INTRO_MS = 4500
 export const MAX_MISSED_ROLLS = 5
 // Keep in sync with the mobile coronation presentation.
 const FIRST_CORONATION_MS = 12_500
@@ -115,6 +116,7 @@ export interface MatchState {
   /** Epoch ms by which the current seat must act. */
   deadline: number
   opensAt: number
+  introMs: number
   coronationUntil: number
 }
 
@@ -164,6 +166,7 @@ export interface RoomSnapshot {
     missedRolls: Partial<Record<Seat, number>>
     deadline: number
     opensAt: number
+    introMs: number
   } | null
 }
 
@@ -362,7 +365,7 @@ export function canStart(room: Room): string | null {
   return null
 }
 
-export function startMatch(room: Room, opensAt = Date.now()): MatchState {
+export function startMatch(room: Room, opensAt = Date.now(), introMs = MATCH_INTRO_MS): MatchState {
   const seats = room.members
     .map((m) => m.seat)
     .filter((s): s is Seat => s !== null)
@@ -380,6 +383,7 @@ export function startMatch(room: Room, opensAt = Date.now()): MatchState {
     eliminated: [],
     missedRolls: {},
     opensAt,
+    introMs,
     deadline: opensAt + TURN_MS,
     coronationUntil: 0,
   }
@@ -627,6 +631,7 @@ export function snapshot(room: Room, includeCharacters = false): RoomSnapshot {
           missedRolls: room.match.missedRolls,
           deadline: room.match.deadline,
           opensAt: room.match.opensAt,
+          introMs: room.match.introMs,
         }
       : null,
   }
